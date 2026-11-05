@@ -286,8 +286,12 @@ static struct kmscon_glyph *kmscon_font_psf_render(struct kmscon_font *kfont,
 	if (font->has_unicode_table)
 		ch = unicode_table_get(&font->unicode_table, ch);
 
-	if (ch >= font->glyphs)
-		return new_glyph(kfont, attr, '?');
+	if (ch >= font->glyphs) {
+		/* '?' sits at its ASCII position only in fonts ordered that way */
+		ch = font->has_unicode_table ? unicode_table_get(&font->unicode_table, '?') : '?';
+		if (ch >= font->glyphs)
+			ch = 0;
+	}
 
 	return new_glyph(kfont, attr, ch);
 }
@@ -371,42 +375,55 @@ static uint8_t utf8_len(uint8_t c)
 
 uint8_t psf2_unicode_table_parse(unicode_table_t *self, void *file)
 {
-	uint8_t ucode[UCODE_SIZE];
-	uint32_t ucode_idx = 0;
-	uint32_t ucode_size;
+	uint8_t *ucode = NULL, *tmp;
+	size_t ucode_size = 0, cap = 0, i = 0;
+	int n;
 	uint16_t ch = 0;
 	uint8_t len;
+	uint32_t val;
 
-	union {
-		uint32_t val;
-		uint8_t map[4];
-	} code;
+	/* Read the whole table first: a UTF-8 sequence may cross any read boundary. */
+	do {
+		if (ucode_size == cap) {
+			tmp = realloc(ucode, cap += UCODE_SIZE);
+			if (!tmp) {
+				free(ucode);
+				log_error("failed alloc unicode table buffer");
+				return 1;
+			}
+			ucode = tmp;
+		}
+		n = _fread(file, ucode + ucode_size, cap - ucode_size);
+		if (n > 0)
+			ucode_size += n;
+	} while (n > 0);
 
-	while ((ucode_size = _fread(file, &ucode, UCODE_SIZE))) {
-		while (ucode_idx < ucode_size) {
-			code.val = 0;
-			switch ((code.map[0] = ucode[ucode_idx++])) {
-			case 0xfe:
-			case 0xff:
-				ch++;
-				break;
-			default:
-				len = utf8_len(code.map[0]);
-				if (len) {
-					code.val = ((uint32_t)(code.map[0] & (0xFF >> (2 + len)))
-						    << len * 6);
+	while (i < ucode_size) {
+		switch (ucode[i]) {
+		case 0xff:
+			ch++;
+			i++;
+			break;
+		case 0xfe:
+			/* sequences are not supported: skip to the end of this glyph's entry */
+			while (i < ucode_size && ucode[i] != 0xff)
+				i++;
+			break;
+		default:
+			len = utf8_len(ucode[i]);
+			val = len ? (uint32_t)(ucode[i] & (0xFF >> (2 + len))) << len * 6
+				  : ucode[i];
+			i++;
+			for (; len && i < ucode_size; len--)
+				val |= (uint32_t)(ucode[i++] & 0x3f) << (len - 1) * 6;
 
-					for (; len; len--)
-						code.val |= ((uint32_t)(ucode[ucode_idx++] & 0x3f)
-							     << (len - 1) * 6);
-				}
-
-				if (unicode_table_add(self, code.val, ch))
-					return 1;
+			if (unicode_table_add(self, val, ch)) {
+				free(ucode);
+				return 1;
 			}
 		}
-		ucode_idx = 0;
 	}
+	free(ucode);
 
 	qsort(self->data, self->size, sizeof(unicode_entry_t), cmp_unicode_entry);
 	return 0;
