@@ -788,6 +788,10 @@ void input_set_pointer_max(struct input *input, unsigned int max_x, unsigned int
 
 	input->pointer_max_x = max_x;
 	input->pointer_max_y = max_y;
+	if (input->pointer_x > input->pointer_max_x)
+		input->pointer_x = input->pointer_max_x;
+	if (input->pointer_y > input->pointer_max_y)
+		input->pointer_y = input->pointer_max_y;
 }
 
 SHL_EXPORT

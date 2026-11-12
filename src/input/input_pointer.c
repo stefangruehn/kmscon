@@ -22,8 +22,8 @@ static void pointer_dev_send_move(struct input_dev *dev)
 	struct input_pointer_event pev = {0};
 
 	pev.event = POINTER_MOVED;
-	pev.pointer_x = dev->pointer.x;
-	pev.pointer_y = dev->pointer.y;
+	pev.pointer_x = dev->input->pointer_x;
+	pev.pointer_y = dev->input->pointer_y;
 
 	/* Include button state if a button is pressed during motion (drag) */
 	if (dev->pointer.pressed_button != BUTTON_NONE) {
@@ -70,23 +70,26 @@ void pointer_dev_sync(struct input_dev *dev)
 	pointer_update_inactivity_timer(dev);
 }
 
+static int32_t clamp_axis(int32_t value, int32_t max)
+{
+	if (value < 0)
+		return 0;
+	if (value > max)
+		return max;
+	return value;
+}
+
 void pointer_dev_rel(struct input_dev *dev, uint16_t code, int32_t value)
 {
+	struct input *input = dev->input;
+
 	switch (code) {
 	case REL_X:
-		dev->pointer.x += value;
-		if (dev->pointer.x < 0)
-			dev->pointer.x = 0;
-		if (dev->pointer.x > dev->input->pointer_max_x)
-			dev->pointer.x = dev->input->pointer_max_x;
+		input->pointer_x = clamp_axis(input->pointer_x + value, input->pointer_max_x);
 		pointer_dev_send_move(dev);
 		break;
 	case REL_Y:
-		dev->pointer.y += value;
-		if (dev->pointer.y < 0)
-			dev->pointer.y = 0;
-		if (dev->pointer.y > dev->input->pointer_max_y)
-			dev->pointer.y = dev->input->pointer_max_y;
+		input->pointer_y = clamp_axis(input->pointer_y + value, input->pointer_max_y);
 		pointer_dev_send_move(dev);
 		break;
 	case REL_WHEEL:
@@ -104,38 +107,47 @@ void pointer_dev_rel(struct input_dev *dev, uint16_t code, int32_t value)
  */
 #define TOUCHPAD_PIXELS_PER_MM 10
 
-static int32_t touchpad_distance(int32_t units, int32_t res)
+/*
+ * Move by the finger's motion since the last event, keeping the fraction of
+ * a pixel for the next one, so the pointer continues from wherever another
+ * device left it, even during a touch.
+ */
+static int32_t touchpad_motion(int32_t value, int32_t *raw, int32_t *rem, int32_t res)
 {
+	int32_t units = value - *raw;
+	int32_t acc, move;
+
+	*raw = value;
 	if (res <= 0)
 		return units;
-	return units * TOUCHPAD_PIXELS_PER_MM / res;
+	acc = units * TOUCHPAD_PIXELS_PER_MM + *rem;
+	move = acc / res;
+	*rem = acc - move * res;
+	return move;
 }
 
 static void pointer_dev_abs_x(struct input_dev *dev, int32_t value)
 {
+	struct input *input = dev->input;
+	int32_t move;
+
 	switch (dev->pointer.kind) {
 	case POINTER_TOUCHPAD:
 		if (dev->pointer.touchpad_needs_sync_off_x) {
-			dev->pointer.anchor_x = dev->pointer.x;
 			dev->pointer.raw_x = value;
+			dev->pointer.rem_x = 0;
 			dev->pointer.touchpad_needs_sync_off_x = false;
 		}
-
-		if (dev->pointer.touchpaddown) {
-			dev->pointer.x = dev->pointer.anchor_x +
-					touchpad_distance(value - dev->pointer.raw_x,
-							  dev->pointer.res_x);
-			if (dev->pointer.x < 0 || dev->pointer.x > dev->input->pointer_max_x) {
-				dev->pointer.x = dev->pointer.x < 0 ? 0 : dev->input->pointer_max_x;
-				dev->pointer.anchor_x = dev->pointer.x;
-				dev->pointer.raw_x = value;
-			}
-		}
+		if (!dev->pointer.touchpaddown)
+			return;
+		move = touchpad_motion(value, &dev->pointer.raw_x, &dev->pointer.rem_x,
+				       dev->pointer.res_x);
+		input->pointer_x = clamp_axis(input->pointer_x + move, input->pointer_max_x);
 		break;
 	case POINTER_TOUCHSCREEN:
 	case POINTER_VMOUSE:
-		dev->pointer.x = ((value - dev->pointer.min_x) * dev->input->pointer_max_x) /
-				 (dev->pointer.max_x - dev->pointer.min_x);
+		input->pointer_x = ((value - dev->pointer.min_x) * input->pointer_max_x) /
+				   (dev->pointer.max_x - dev->pointer.min_x);
 		break;
 	default:
 		return;
@@ -145,29 +157,26 @@ static void pointer_dev_abs_x(struct input_dev *dev, int32_t value)
 
 static void pointer_dev_abs_y(struct input_dev *dev, int32_t value)
 {
+	struct input *input = dev->input;
+	int32_t move;
+
 	switch (dev->pointer.kind) {
 	case POINTER_TOUCHPAD:
 		if (dev->pointer.touchpad_needs_sync_off_y) {
-			dev->pointer.anchor_y = dev->pointer.y;
 			dev->pointer.raw_y = value;
+			dev->pointer.rem_y = 0;
 			dev->pointer.touchpad_needs_sync_off_y = false;
 		}
-
-		if (dev->pointer.touchpaddown) {
-			dev->pointer.y = dev->pointer.anchor_y +
-					touchpad_distance(value - dev->pointer.raw_y,
-							  dev->pointer.res_y);
-			if (dev->pointer.y < 0 || dev->pointer.y > dev->input->pointer_max_y) {
-				dev->pointer.y = dev->pointer.y < 0 ? 0 : dev->input->pointer_max_y;
-				dev->pointer.anchor_y = dev->pointer.y;
-				dev->pointer.raw_y = value;
-			}
-		}
+		if (!dev->pointer.touchpaddown)
+			return;
+		move = touchpad_motion(value, &dev->pointer.raw_y, &dev->pointer.rem_y,
+				       dev->pointer.res_y);
+		input->pointer_y = clamp_axis(input->pointer_y + move, input->pointer_max_y);
 		break;
 	case POINTER_TOUCHSCREEN:
 	case POINTER_VMOUSE:
-		dev->pointer.y = ((value - dev->pointer.min_y) * dev->input->pointer_max_y) /
-				 (dev->pointer.max_y - dev->pointer.min_y);
+		input->pointer_y = ((value - dev->pointer.min_y) * input->pointer_max_y) /
+				   (dev->pointer.max_y - dev->pointer.min_y);
 		break;
 	default:
 		return;
