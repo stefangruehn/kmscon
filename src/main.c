@@ -109,7 +109,7 @@ static void listen_to_dbus_locale1(struct kmscon_app *app)
 	int ret;
 
 	if (app->conf->xkb_keymap || app->conf->xkb_model || app->conf->xkb_layout ||
-	    app->conf->xkb_variant || app->conf->xkb_options)
+	    app->conf->xkb_variant || app->conf->xkb_options || app->conf->keyboard_file)
 		return;
 
 	ret = kmscon_dbus_listen_locale1(app->dbus, update_xkb_layout, app);
