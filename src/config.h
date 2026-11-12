@@ -209,6 +209,8 @@ struct kmscon_conf_t {
 	char *palette;
 	/* custom palette */
 	palette_t custom_palette;
+	/* file with the 16 colours of the custom palette */
+	char *palette_file;
 };
 
 int kmscon_conf_new(struct conf_ctx **out);

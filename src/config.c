@@ -248,7 +248,11 @@ static void print_help()
 		"\t                                      custom palette\n"
 		"\t    --palette-background <color>    [  0,   0,   0]\n"
 		"\t                                      Default background color in\n"
-		"\t                                      custom palette\n",
+		"\t                                      custom palette\n"
+		"\t    --palette-file <path>           [off]\n"
+		"\t                                      16 colours as rrggbb for the\n"
+		"\t                                      custom palette, read again on\n"
+		"\t                                      SIGHUP\n",
 		"kmscon");
 	/*
 	 * 80 char line:
@@ -1085,6 +1089,7 @@ int kmscon_conf_new(struct conf_ctx **out)
 		CONF_OPTION_COLOR("palette-white", conf->custom_palette, TSM_COLOR_WHITE),
 		CONF_OPTION_COLOR("palette-foreground", conf->custom_palette, TSM_COLOR_FOREGROUND),
 		CONF_OPTION_COLOR("palette-background", conf->custom_palette, TSM_COLOR_BACKGROUND),
+		CONF_OPTION_STRING(0, "palette-file", &conf->palette_file, NULL),
 	};
 
 	ret = conf_ctx_new(&ctx, options, sizeof(options) / sizeof(*options), conf);
