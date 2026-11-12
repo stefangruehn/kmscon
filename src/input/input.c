@@ -125,6 +125,7 @@ static int input_init_abs(struct input_dev *dev)
 
 	dev->pointer.min_x = info.minimum;
 	dev->pointer.max_x = info.maximum;
+	dev->pointer.res_x = info.resolution;
 
 	ret = ioctl(dev->rfd, EVIOCGABS(ABS_Y), &info);
 	if (ret < 0)
@@ -132,6 +133,7 @@ static int input_init_abs(struct input_dev *dev)
 
 	dev->pointer.min_y = info.minimum;
 	dev->pointer.max_y = info.maximum;
+	dev->pointer.res_y = info.resolution;
 
 	log_debug("ABSX min %d max %d ABSY min %d max %d\n", dev->pointer.min_x, dev->pointer.max_x,
 		  dev->pointer.min_y, dev->pointer.max_y);

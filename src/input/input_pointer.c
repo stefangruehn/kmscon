@@ -97,24 +97,38 @@ void pointer_dev_rel(struct input_dev *dev, uint16_t code, int32_t value)
 	}
 }
 
+/*
+ * Touchpads move the pointer by finger distance, not by raw axis units, so
+ * the speed does not depend on the pad's resolution (which may differ
+ * between the axes). Without a reported resolution, units map to pixels.
+ */
+#define TOUCHPAD_PIXELS_PER_MM 10
+
+static int32_t touchpad_distance(int32_t units, int32_t res)
+{
+	if (res <= 0)
+		return units;
+	return units * TOUCHPAD_PIXELS_PER_MM / res;
+}
+
 static void pointer_dev_abs_x(struct input_dev *dev, int32_t value)
 {
 	switch (dev->pointer.kind) {
 	case POINTER_TOUCHPAD:
 		if (dev->pointer.touchpad_needs_sync_off_x) {
-			dev->pointer.off_x = dev->pointer.x - value;
+			dev->pointer.anchor_x = dev->pointer.x;
+			dev->pointer.raw_x = value;
 			dev->pointer.touchpad_needs_sync_off_x = false;
 		}
 
 		if (dev->pointer.touchpaddown) {
-			dev->pointer.x = dev->pointer.off_x + value;
-			if (dev->pointer.x < 0) {
-				dev->pointer.x = 0;
-				dev->pointer.off_x = -value;
-			}
-			if (dev->pointer.x > dev->input->pointer_max_x) {
-				dev->pointer.x = dev->input->pointer_max_x;
-				dev->pointer.off_x = dev->input->pointer_max_x - value;
+			dev->pointer.x = dev->pointer.anchor_x +
+					touchpad_distance(value - dev->pointer.raw_x,
+							  dev->pointer.res_x);
+			if (dev->pointer.x < 0 || dev->pointer.x > dev->input->pointer_max_x) {
+				dev->pointer.x = dev->pointer.x < 0 ? 0 : dev->input->pointer_max_x;
+				dev->pointer.anchor_x = dev->pointer.x;
+				dev->pointer.raw_x = value;
 			}
 		}
 		break;
@@ -134,19 +148,19 @@ static void pointer_dev_abs_y(struct input_dev *dev, int32_t value)
 	switch (dev->pointer.kind) {
 	case POINTER_TOUCHPAD:
 		if (dev->pointer.touchpad_needs_sync_off_y) {
-			dev->pointer.off_y = dev->pointer.y - value;
+			dev->pointer.anchor_y = dev->pointer.y;
+			dev->pointer.raw_y = value;
 			dev->pointer.touchpad_needs_sync_off_y = false;
 		}
 
 		if (dev->pointer.touchpaddown) {
-			dev->pointer.y = dev->pointer.off_y + value;
-			if (dev->pointer.y < 0) {
-				dev->pointer.y = 0;
-				dev->pointer.off_y = -value;
-			}
-			if (dev->pointer.y > dev->input->pointer_max_y) {
-				dev->pointer.y = dev->input->pointer_max_y;
-				dev->pointer.off_y = dev->input->pointer_max_y - value;
+			dev->pointer.y = dev->pointer.anchor_y +
+					touchpad_distance(value - dev->pointer.raw_y,
+							  dev->pointer.res_y);
+			if (dev->pointer.y < 0 || dev->pointer.y > dev->input->pointer_max_y) {
+				dev->pointer.y = dev->pointer.y < 0 ? 0 : dev->input->pointer_max_y;
+				dev->pointer.anchor_y = dev->pointer.y;
+				dev->pointer.raw_y = value;
 			}
 		}
 		break;
