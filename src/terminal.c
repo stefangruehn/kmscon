@@ -978,6 +978,73 @@ static void font_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info, v
 	terminal_update_size_notify(term);
 }
 
+/*
+ * Read the custom palette from --palette-file: 16 colours as rrggbb, separated
+ * by blanks, lines starting with # are comments. Colour 0 is also the
+ * background, colour 7 the foreground; the other entries keep their value.
+ */
+static int palette_read(const char *path, palette_t out)
+{
+	char line[512], *tok, *save, *end;
+	unsigned int n = 0;
+	unsigned long rgb;
+	FILE *f;
+
+	f = fopen(path, "re");
+	if (!f)
+		return -errno;
+	while (n < 16 && fgets(line, sizeof(line), f)) {
+		if (line[0] == '#')
+			continue;
+		for (tok = strtok_r(line, " \t\n", &save); tok && n < 16;
+		     tok = strtok_r(NULL, " \t\n", &save)) {
+			rgb = strtoul(tok, &end, 16);
+			if (strlen(tok) != 6 || *end) {
+				fclose(f);
+				return -EINVAL;
+			}
+			out[n][0] = rgb >> 16;
+			out[n][1] = (rgb >> 8) & 0xff;
+			out[n][2] = rgb & 0xff;
+			++n;
+		}
+	}
+	fclose(f);
+	if (n < 16)
+		return -EINVAL;
+	memcpy(out[TSM_COLOR_BACKGROUND], out[TSM_COLOR_BLACK], 3);
+	memcpy(out[TSM_COLOR_FOREGROUND], out[TSM_COLOR_LIGHT_GREY], 3);
+	return 0;
+}
+
+static int palette_load(struct kmscon_terminal *term)
+{
+	palette_t palette;
+	int ret;
+
+	if (!term->conf->palette_file)
+		return 0;
+	memcpy(palette, term->conf->custom_palette, sizeof(palette));
+	ret = palette_read(term->conf->palette_file, palette);
+	if (ret) {
+		log_warning("cannot read palette %s: %d", term->conf->palette_file, ret);
+		return ret;
+	}
+	return tsm_vte_set_custom_palette(term->vte, palette);
+}
+
+/*
+ * SIGHUP: read the palette file again. libtsm clears the screen with the new
+ * colours; full-screen programs draw again on their next update.
+ */
+static void palette_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info, void *data)
+{
+	struct kmscon_terminal *term = data;
+
+	if (!palette_load(term))
+		redraw_all(term);
+}
+
 static void input_event(struct input *input, struct input_key_event *ev, void *data)
 {
 	struct kmscon_terminal *term = data;
@@ -1401,6 +1468,7 @@ void terminal_destroy(struct kmscon_terminal *term)
 {
 	log_debug("free terminal object %p", term);
 
+	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, palette_reload, term);
 	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, font_reload, term);
 	terminal_close(term);
 	rm_all_screens(term);
@@ -1505,6 +1573,8 @@ struct kmscon_terminal *terminal_new(struct kmscon_session *session, unsigned in
 	ret = tsm_vte_set_custom_palette(term->vte, term->conf->custom_palette);
 	if (ret)
 		goto err_vte;
+	/* on a bad file the colours given as options stay */
+	palette_load(term);
 
 	term->font_size = term->conf->font_size;
 	if (term->font_size) {
@@ -1559,12 +1629,17 @@ struct kmscon_terminal *terminal_new(struct kmscon_session *session, unsigned in
 	ret = ev_eloop_register_signal_cb(term->eloop, SIGHUP, font_reload, term);
 	if (ret)
 		goto err_asciinema;
+	ret = ev_eloop_register_signal_cb(term->eloop, SIGHUP, palette_reload, term);
+	if (ret)
+		goto err_font_reload;
 
 	ev_eloop_ref(term->eloop);
 	input_ref(term->input);
 	log_debug("new terminal object %p", term);
 	return term;
 
+err_font_reload:
+	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, font_reload, term);
 err_asciinema:
 	kmscon_asciinema_free(term->asciinema);
 	ev_eloop_rm_timer(term->blink_cursor);
