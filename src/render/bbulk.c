@@ -113,7 +113,13 @@ static void compute_border(struct kmscon_text *txt)
 {
 	struct bbulk *bb = txt->data;
 
-	if (txt->orientation == OR_NORMAL || txt->orientation == OR_UPSIDE_DOWN) {
+	if (txt->orientation == OR_NORMAL) {
+		/* top left, as the Linux console */
+		bb->off_x = 0;
+		bb->off_y = 0;
+		bb->max_x = txt->cols * FONT_WIDTH(txt);
+		bb->max_y = txt->rows * FONT_HEIGHT(txt);
+	} else if (txt->orientation == OR_UPSIDE_DOWN) {
 		bb->off_x = (bb->sw - txt->cols * FONT_WIDTH(txt)) / 2;
 		bb->off_y = (bb->sh - txt->rows * FONT_HEIGHT(txt)) / 2;
 		bb->max_x = bb->off_x + txt->cols * FONT_WIDTH(txt);
