@@ -74,6 +74,8 @@ struct drm_display {
 	uint32_t mode_blob_id;
 	uint32_t crtc_index;
 	uint32_t damage_blob_id;
+	/* the last frame was rendered but its page flip failed */
+	bool frame_lost;
 
 	drmModeModeInfoPtr current_mode;
 	drmModeModeInfoPtr previous_mode;
