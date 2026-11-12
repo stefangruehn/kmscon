@@ -107,6 +107,11 @@ struct kmscon_terminal {
 	 */
 	bool auto_font_size;
 	unsigned int font_size;
+	/* file behind the font name and colours of the palette file, as last
+	 * loaded: SIGHUP reloads only what changed */
+	char *font_target;
+	palette_t file_palette;
+	bool file_palette_set;
 
 	struct kmscon_pointer pointer;
 
@@ -962,11 +967,21 @@ static void zoom_out(struct kmscon_terminal *term)
 /*
  * SIGHUP: read the font file again, at its own size. The font name may be a
  * link that was pointed to another file, so the size of the text changes
- * without restarting kmscon. Like a zoom, this ends the automatic size.
+ * without restarting kmscon. Like a zoom, this ends the automatic size; a
+ * signal for another setting leaves the font and a zoom alone.
  */
 static void font_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info, void *data)
 {
 	struct kmscon_terminal *term = data;
+	char *target;
+
+	target = term->conf->font_name ? realpath(term->conf->font_name, NULL) : NULL;
+	if (target && term->font_target && !strcmp(target, term->font_target)) {
+		free(target);
+		return;
+	}
+	free(term->font_target);
+	term->font_target = target;
 
 	term->auto_font_size = false;
 	if (font_set(term, 1)) {
@@ -1030,6 +1045,11 @@ static int palette_load(struct kmscon_terminal *term)
 		log_warning("cannot read palette %s: %d", term->conf->palette_file, ret);
 		return ret;
 	}
+	/* setting the palette clears the screen, so not without a change */
+	if (term->file_palette_set && !memcmp(palette, term->file_palette, sizeof(palette)))
+		return 1;
+	memcpy(term->file_palette, palette, sizeof(palette));
+	term->file_palette_set = true;
 	return tsm_vte_set_custom_palette(term->vte, palette);
 }
 
@@ -1485,6 +1505,7 @@ void terminal_destroy(struct kmscon_terminal *term)
 	input_unref(term->input);
 	ev_eloop_unref(term->eloop);
 	free_selection(term);
+	free(term->font_target);
 	free(term);
 }
 
@@ -1575,6 +1596,8 @@ struct kmscon_terminal *terminal_new(struct kmscon_session *session, unsigned in
 		goto err_vte;
 	/* on a bad file the colours given as options stay */
 	palette_load(term);
+	if (term->conf->font_name)
+		term->font_target = realpath(term->conf->font_name, NULL);
 
 	term->font_size = term->conf->font_size;
 	if (term->font_size) {
@@ -1660,6 +1683,7 @@ err_vte:
 err_con:
 	tsm_screen_unref(term->console);
 err_free:
+	free(term->font_target);
 	free(term);
 	return NULL;
 }
