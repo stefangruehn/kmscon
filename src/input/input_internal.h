@@ -64,18 +64,16 @@ struct input_pointer {
 	enum pointer_kind kind;
 	enum input_ev_type action;
 	struct timespec last_click;
-	int32_t x;
-	int32_t y;
 
 	bool touchpaddown;
 	bool touchpad_needs_sync_off_x;
 	bool touchpad_needs_sync_off_y;
 
-	/* touchpad: pointer position and raw axis value at touch down */
-	int32_t anchor_x;
-	int32_t anchor_y;
+	/* touchpad: last raw axis value, and the motion not yet a whole pixel */
 	int32_t raw_x;
 	int32_t raw_y;
+	int32_t rem_x;
+	int32_t rem_y;
 	/* axis resolution in units per mm, 0 if the device does not tell */
 	int32_t res_x;
 	int32_t res_y;
@@ -134,6 +132,9 @@ struct input {
 
 	bool mouse_enabled;
 	struct shl_hook *pointer_hook;
+	/* one pointer position, shared by all pointing devices */
+	int32_t pointer_x;
+	int32_t pointer_y;
 	int32_t pointer_max_x;
 	int32_t pointer_max_y;
 	struct ev_timer *hide_pointer;
