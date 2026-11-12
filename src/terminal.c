@@ -33,6 +33,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <libtsm.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -958,6 +959,25 @@ static void zoom_out(struct kmscon_terminal *term)
 	terminal_update_size_notify(term);
 }
 
+/*
+ * SIGHUP: read the font file again, at its own size. The font name may be a
+ * link that was pointed to another file, so the size of the text changes
+ * without restarting kmscon. Like a zoom, this ends the automatic size.
+ */
+static void font_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info, void *data)
+{
+	struct kmscon_terminal *term = data;
+
+	term->auto_font_size = false;
+	if (font_set(term, 1)) {
+		log_warning("cannot reload font %s", term->conf->font_name);
+		return;
+	}
+	term->font_size = term->font->height;
+	font_update_all(term);
+	terminal_update_size_notify(term);
+}
+
 static void input_event(struct input *input, struct input_key_event *ev, void *data)
 {
 	struct kmscon_terminal *term = data;
@@ -1381,6 +1401,7 @@ void terminal_destroy(struct kmscon_terminal *term)
 {
 	log_debug("free terminal object %p", term);
 
+	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, font_reload, term);
 	terminal_close(term);
 	rm_all_screens(term);
 	ev_eloop_rm_timer(term->blink_timer);
@@ -1535,11 +1556,18 @@ struct kmscon_terminal *terminal_new(struct kmscon_session *session, unsigned in
 			log_warn("cannot load asciicast %s: %d", term->conf->asciicast, ret);
 	}
 
+	ret = ev_eloop_register_signal_cb(term->eloop, SIGHUP, font_reload, term);
+	if (ret)
+		goto err_asciinema;
+
 	ev_eloop_ref(term->eloop);
 	input_ref(term->input);
 	log_debug("new terminal object %p", term);
 	return term;
 
+err_asciinema:
+	kmscon_asciinema_free(term->asciinema);
+	ev_eloop_rm_timer(term->blink_cursor);
 err_blink:
 	ev_eloop_rm_timer(term->blink_timer);
 err_pointer:
