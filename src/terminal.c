@@ -145,10 +145,20 @@ static void coord_to_cell(struct kmscon_terminal *term, int32_t x, int32_t y, un
 	*posy = min(y / fh, h - 1);
 }
 
+/* The pointer is red from the palette, so it follows the day and night colours. */
+static const uint8_t *pointer_colour(struct kmscon_terminal *term)
+{
+	if (term->file_palette_set)
+		return term->file_palette[TSM_COLOR_RED];
+	return term->conf->custom_palette[TSM_COLOR_RED];
+}
+
 static void draw_pointer(struct screen *scr)
 {
 	if (!scr->term->pointer.visible || scr->hw_cursor || !scr->term->font)
 		return;
+
+	kmscon_text_set_pointer_colour(scr->txt, pointer_colour(scr->term));
 
 	if (scr->scaled) {
 		int32_t x, y;
@@ -188,64 +198,54 @@ static unsigned int rotate_index(enum Orientation orientation, unsigned int w, u
 }
 
 /*
- * Arrow pointer, white with a dark outline, as tall as a text line. The
- * shape is built into a boolean mask, then rendered in a single pass that
- * fills white on the shape and a dark outline on any pixel within @thk of it.
- * The hotspot is the tip of the arrow.
+ * Arrow pointer in @fill with a dark outline, as tall as a text line. The
+ * shape and the pixels within the outline width of it are built into boolean
+ * masks, then rendered in a single pass. The hotspot is the tip of the arrow.
  */
 static uint32_t *generate_arrow_cursor(unsigned int font_height, enum Orientation orientation,
-				       unsigned int *width, unsigned int *height,
+				       uint32_t fill, unsigned int *width, unsigned int *height,
 				       unsigned int *hot_x, unsigned int *hot_y)
 {
 	unsigned int ah, h, w, thk, idx;
-	int x, y, ny, nx;
-	bool *shape, near;
-	uint32_t white, outline;
+	int x, y;
+	bool *shape, *near;
+	uint32_t outline;
 	uint32_t *pixels;
 	double scale;
 
 	ah = font_height > 12 ? font_height : 12;
-	thk = 1 + (ah / 16);
+	thk = pointer_outline_width(ah);
 	ah = min(ah, VIDEO_CURSOR_MAX_SIZE - 2 * thk);
 	scale = ah / POINTER_ARROW_H;
 	w = (unsigned int)(POINTER_ARROW_W * scale + 0.999) + 2 * thk;
 	h = ah + 2 * thk;
 
-	white = argb(255, 255, 255, 255);
 	outline = argb(220, 0, 0, 0);
 
 	shape = calloc(w, h * sizeof(*shape));
-	if (!shape)
-		return NULL;
-
+	near = calloc(w, h * sizeof(*near));
 	pixels = calloc(w, h * sizeof(*pixels));
-	if (!pixels) {
+	if (!shape || !near || !pixels) {
 		free(shape);
+		free(near);
+		free(pixels);
 		return NULL;
 	}
 
 	pointer_arrow_mask(shape, w, h, thk, thk, scale);
+	pointer_outline_mask(shape, near, w, h, thk);
 
 	for (y = 0; y < (int)h; y++) {
 		for (x = 0; x < (int)w; x++) {
 			idx = rotate_index(orientation, w, h, x, y);
-			if (shape[y * w + x]) {
-				pixels[idx] = white;
-				continue;
-			}
-			near = false;
-			for (ny = y - (int)thk; ny <= y + (int)thk && !near; ny++) {
-				for (nx = x - (int)thk; nx <= x + (int)thk && !near; nx++) {
-					if (ny >= 0 && ny < (int)h && nx >= 0 && nx < (int)w &&
-					    shape[ny * w + nx])
-						near = true;
-				}
-			}
-			if (near)
+			if (shape[y * w + x])
+				pixels[idx] = fill;
+			else if (near[y * w + x])
 				pixels[idx] = outline;
 		}
 	}
 	free(shape);
+	free(near);
 
 	idx = rotate_index(orientation, w, h, thk, thk);
 	if (orientation == OR_LEFT || orientation == OR_RIGHT) {
@@ -263,14 +263,17 @@ static uint32_t *generate_arrow_cursor(unsigned int font_height, enum Orientatio
 static void setup_hw_cursor(struct screen *scr)
 {
 	unsigned int cur_w, cur_h, hot_x, hot_y;
+	const uint8_t *rgb;
 	uint32_t *pixels;
 	int ret;
 
 	if (!scr->txt->font)
 		return;
 
-	pixels = generate_arrow_cursor(scr->txt->font->height, scr->txt->orientation, &cur_w,
-				       &cur_h, &hot_x, &hot_y);
+	rgb = pointer_colour(scr->term);
+	pixels = generate_arrow_cursor(scr->txt->font->height, scr->txt->orientation,
+				       argb(255, rgb[0], rgb[1], rgb[2]), &cur_w, &cur_h, &hot_x,
+				       &hot_y);
 	if (!pixels)
 		return;
 
@@ -1060,9 +1063,16 @@ static int palette_load(struct kmscon_terminal *term)
 static void palette_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info, void *data)
 {
 	struct kmscon_terminal *term = data;
+	struct screen *scr;
 
-	if (!palette_load(term))
-		redraw_all(term);
+	if (palette_load(term))
+		return;
+	/* the hardware cursor carries its colour in its image */
+	dlist_for_each_entry(scr, &term->screens, list)
+	{
+		refresh_hw_cursor(scr);
+	}
+	redraw_all(term);
 }
 
 static void input_event(struct input *input, struct input_key_event *ev, void *data)

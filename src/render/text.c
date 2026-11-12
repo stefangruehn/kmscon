@@ -159,6 +159,7 @@ int kmscon_text_new(struct kmscon_text **out, const char *backend, enum Orientat
 	}
 
 	text->orientation = orientation;
+	memset(text->pointer_rgb, 255, sizeof(text->pointer_rgb));
 
 	ret = new_text(text, backend);
 	if (ret) {
@@ -491,6 +492,13 @@ int kmscon_text_draw_pointer(struct kmscon_text *txt, unsigned int x, unsigned i
 		return -EINVAL;
 
 	return txt->ops->draw_pointer(txt, x, y);
+}
+
+/* Fill colour of the software pointer, used from the next frame on. */
+void kmscon_text_set_pointer_colour(struct kmscon_text *txt, const uint8_t rgb[3])
+{
+	if (txt)
+		memcpy(txt->pointer_rgb, rgb, sizeof(txt->pointer_rgb));
 }
 
 /**
