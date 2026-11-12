@@ -112,6 +112,9 @@ struct kmscon_terminal {
 	char *font_target;
 	palette_t file_palette;
 	bool file_palette_set;
+	/* optional 17th colour of the palette file, for the pointer */
+	uint8_t file_pointer[3];
+	bool file_pointer_set;
 
 	struct kmscon_pointer pointer;
 
@@ -145,9 +148,14 @@ static void coord_to_cell(struct kmscon_terminal *term, int32_t x, int32_t y, un
 	*posy = min(y / fh, h - 1);
 }
 
-/* The pointer is red from the palette, so it follows the day and night colours. */
+/*
+ * The pointer takes the 17th colour of the palette file, or red from the
+ * palette, so it follows the day and night colours.
+ */
 static const uint8_t *pointer_colour(struct kmscon_terminal *term)
 {
+	if (term->file_pointer_set)
+		return term->file_pointer;
 	if (term->file_palette_set)
 		return term->file_palette[TSM_COLOR_RED];
 	return term->conf->custom_palette[TSM_COLOR_RED];
@@ -1000,8 +1008,10 @@ static void font_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info, v
  * Read the custom palette from --palette-file: 16 colours as rrggbb, separated
  * by blanks, lines starting with # are comments. Colour 0 is also the
  * background, colour 7 the foreground; the other entries keep their value.
+ * An optional 17th colour goes to pointer, and *has_pointer tells whether
+ * there was one.
  */
-static int palette_read(const char *path, palette_t out)
+static int palette_read(const char *path, palette_t out, uint8_t pointer[3], bool *has_pointer)
 {
 	char line[512], *tok, *save, *end;
 	unsigned int n = 0;
@@ -1011,19 +1021,23 @@ static int palette_read(const char *path, palette_t out)
 	f = fopen(path, "re");
 	if (!f)
 		return -errno;
-	while (n < 16 && fgets(line, sizeof(line), f)) {
+	*has_pointer = false;
+	while (n < 17 && fgets(line, sizeof(line), f)) {
 		if (line[0] == '#')
 			continue;
-		for (tok = strtok_r(line, " \t\n", &save); tok && n < 16;
+		for (tok = strtok_r(line, " \t\n", &save); tok && n < 17;
 		     tok = strtok_r(NULL, " \t\n", &save)) {
+			uint8_t *rgb_out = n < 16 ? out[n] : pointer;
+
 			rgb = strtoul(tok, &end, 16);
 			if (strlen(tok) != 6 || *end) {
 				fclose(f);
 				return -EINVAL;
 			}
-			out[n][0] = rgb >> 16;
-			out[n][1] = (rgb >> 8) & 0xff;
-			out[n][2] = rgb & 0xff;
+			rgb_out[0] = rgb >> 16;
+			rgb_out[1] = (rgb >> 8) & 0xff;
+			rgb_out[2] = rgb & 0xff;
+			*has_pointer = n == 16;
 			++n;
 		}
 	}
@@ -1038,19 +1052,26 @@ static int palette_read(const char *path, palette_t out)
 static int palette_load(struct kmscon_terminal *term)
 {
 	palette_t palette;
+	uint8_t pointer[3];
+	bool has_pointer = false, pointer_changed;
 	int ret;
 
 	if (!term->conf->palette_file)
 		return 0;
 	memcpy(palette, term->conf->custom_palette, sizeof(palette));
-	ret = palette_read(term->conf->palette_file, palette);
+	ret = palette_read(term->conf->palette_file, palette, pointer, &has_pointer);
 	if (ret) {
 		log_warning("cannot read palette %s: %d", term->conf->palette_file, ret);
 		return ret;
 	}
+	pointer_changed = has_pointer != term->file_pointer_set ||
+			  (has_pointer && memcmp(pointer, term->file_pointer, sizeof(pointer)));
+	if (has_pointer)
+		memcpy(term->file_pointer, pointer, sizeof(pointer));
+	term->file_pointer_set = has_pointer;
 	/* setting the palette clears the screen, so not without a change */
 	if (term->file_palette_set && !memcmp(palette, term->file_palette, sizeof(palette)))
-		return 1;
+		return pointer_changed ? 0 : 1;
 	memcpy(term->file_palette, palette, sizeof(palette));
 	term->file_palette_set = true;
 	return tsm_vte_set_custom_palette(term->vte, palette);
