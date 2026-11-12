@@ -71,8 +71,14 @@ struct input_pointer {
 	bool touchpad_needs_sync_off_x;
 	bool touchpad_needs_sync_off_y;
 
-	int32_t off_x;
-	int32_t off_y;
+	/* touchpad: pointer position and raw axis value at touch down */
+	int32_t anchor_x;
+	int32_t anchor_y;
+	int32_t raw_x;
+	int32_t raw_y;
+	/* axis resolution in units per mm, 0 if the device does not tell */
+	int32_t res_x;
+	int32_t res_y;
 
 	int32_t min_x;
 	int32_t max_x;
