@@ -43,6 +43,7 @@
 #include "input/input.h"
 #include "issue.h"
 #include "pty.h"
+#include "render/pointer.h"
 #include "render/text.h"
 #include "seat.h"
 #include "shl/dlist.h"
@@ -161,24 +162,48 @@ static inline uint32_t argb(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
 }
 
 /*
- * Thin I-beam: 1px stem, proportional top/bottom serifs, 1px outline halo.
- * The shape is built into a boolean mask, then rendered in a single pass
- * that fills white on the shape and a dark outline on any pixel adjacent
- * to it (8-connected).
+ * Map pixel (x, y) of a w x h image in text orientation to its index in the
+ * image rotated to @orientation, as text_show_cursor() maps the position.
  */
-static uint32_t *generate_ibeam_cursor(unsigned int font_height, unsigned int *width,
-				       unsigned int *height, bool rotate)
+static unsigned int rotate_index(enum Orientation orientation, unsigned int w, unsigned int h,
+				 unsigned int x, unsigned int y)
 {
-	unsigned int h, w;
-	int i, x, y, ny, nx, thk;
+	switch (orientation) {
+	default:
+	case OR_NORMAL:
+		return y * w + x;
+	case OR_UPSIDE_DOWN:
+		return (h - 1 - y) * w + (w - 1 - x);
+	case OR_RIGHT:
+		return x * h + (h - 1 - y);
+	case OR_LEFT:
+		return (w - 1 - x) * h + y;
+	}
+}
+
+/*
+ * Arrow pointer, white with a dark outline, as tall as a text line. The
+ * shape is built into a boolean mask, then rendered in a single pass that
+ * fills white on the shape and a dark outline on any pixel within @thk of it.
+ * The hotspot is the tip of the arrow.
+ */
+static uint32_t *generate_arrow_cursor(unsigned int font_height, enum Orientation orientation,
+				       unsigned int *width, unsigned int *height,
+				       unsigned int *hot_x, unsigned int *hot_y)
+{
+	unsigned int ah, h, w, thk, idx;
+	int x, y, ny, nx;
 	bool *shape, near;
 	uint32_t white, outline;
 	uint32_t *pixels;
+	double scale;
 
-	h = font_height > 8 ? font_height : 8;
-	h = min(h, VIDEO_CURSOR_MAX_SIZE);
-	thk = 1 + (h / 16);
-	w = 2 * (h / 6) + 3 * thk;
+	ah = font_height > 12 ? font_height : 12;
+	thk = 1 + (ah / 16);
+	ah = min(ah, VIDEO_CURSOR_MAX_SIZE - 2 * thk);
+	scale = ah / POINTER_ARROW_H;
+	w = (unsigned int)(POINTER_ARROW_W * scale + 0.999) + 2 * thk;
+	h = ah + 2 * thk;
 
 	white = argb(255, 255, 255, 255);
 	outline = argb(220, 0, 0, 0);
@@ -193,78 +218,57 @@ static uint32_t *generate_ibeam_cursor(unsigned int font_height, unsigned int *w
 		return NULL;
 	}
 
-	if (rotate) {
-		unsigned tmp = w;
-		w = h;
-		h = tmp;
-		/* vertical stem */
-		for (x = thk; x < w - thk; x++)
-			for (i = 0; i < thk; i++)
-				shape[x + ((h - thk) / 2) * w + i * w] = true;
+	pointer_arrow_mask(shape, w, h, thk, thk, scale);
 
-		/* Top and bottom serifs */
-		for (y = thk; y < h - thk; y++) {
-			for (i = 0; i < thk; i++) {
-				shape[i + thk + y * w] = true;
-				shape[w - i - 1 - thk + y * w] = true;
-			}
-		}
-	} else {
-		/* vertical stem */
-		for (y = thk; y < h - thk; y++)
-			for (i = 0; i < thk; i++)
-				shape[(w - thk) / 2 + y * w + i] = true;
-
-		/* Top and bottom serifs */
-		for (x = thk; x < w - thk; x++) {
-			for (i = 0; i < thk; i++) {
-				shape[w * (i + thk) + x] = true;
-				shape[(h - i - 1 - thk) * w + x] = true;
-			}
-		}
-	}
-
-	/* White fill on the shape, dark halo on 8-connected neighbors */
-	for (y = 0; y < h; y++) {
-		for (x = 0; x < w; x++) {
+	for (y = 0; y < (int)h; y++) {
+		for (x = 0; x < (int)w; x++) {
+			idx = rotate_index(orientation, w, h, x, y);
 			if (shape[y * w + x]) {
-				pixels[y * w + x] = white;
+				pixels[idx] = white;
 				continue;
 			}
 			near = false;
-			for (ny = y - thk; ny <= y + thk && !near; ny++) {
-				for (nx = x - thk; nx <= x + thk && !near; nx++) {
+			for (ny = y - (int)thk; ny <= y + (int)thk && !near; ny++) {
+				for (nx = x - (int)thk; nx <= x + (int)thk && !near; nx++) {
 					if (ny >= 0 && ny < (int)h && nx >= 0 && nx < (int)w &&
 					    shape[ny * w + nx])
 						near = true;
 				}
 			}
 			if (near)
-				pixels[y * w + x] = outline;
+				pixels[idx] = outline;
 		}
 	}
 	free(shape);
-	*width = w;
-	*height = h;
+
+	idx = rotate_index(orientation, w, h, thk, thk);
+	if (orientation == OR_LEFT || orientation == OR_RIGHT) {
+		*width = h;
+		*height = w;
+	} else {
+		*width = w;
+		*height = h;
+	}
+	*hot_x = idx % *width;
+	*hot_y = idx / *width;
 	return pixels;
 }
 
 static void setup_hw_cursor(struct screen *scr)
 {
-	bool rotate = scr->txt->orientation == OR_LEFT || scr->txt->orientation == OR_RIGHT;
-	unsigned int beam_h;
-	unsigned int beam_w;
+	unsigned int cur_w, cur_h, hot_x, hot_y;
 	uint32_t *pixels;
 	int ret;
 
 	if (!scr->txt->font)
 		return;
 
-	pixels = generate_ibeam_cursor(scr->txt->font->height, &beam_w, &beam_h, rotate);
+	pixels = generate_arrow_cursor(scr->txt->font->height, scr->txt->orientation, &cur_w,
+				       &cur_h, &hot_x, &hot_y);
 	if (!pixels)
 		return;
 
-	ret = display_setup_cursor(scr->disp, pixels, beam_w, beam_h, beam_w / 2, beam_h / 2);
+	ret = display_setup_cursor(scr->disp, pixels, cur_w, cur_h, hot_x, hot_y);
 	free(pixels);
 
 	if (ret) {

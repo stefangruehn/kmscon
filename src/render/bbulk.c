@@ -44,6 +44,7 @@
 #include "shl/log.h"
 #include "shl/lru.h"
 #include "shl/misc.h"
+#include "pointer.h"
 #include "text.h"
 #include "video/video.h"
 
@@ -54,6 +55,10 @@
 
 // Max horizontal distance of two damaged cells to be merged in a damage rectangle
 #define DAMAGE_MERGE_LEN 3
+/* parts of a pointer rectangle outside the text area, see border_parts() */
+#define POINTER_BORDER_PARTS 4
+/* pointer rectangles kept: this frame and the two before */
+#define POINTER_RECTS 3
 
 /* Flags for each cell */
 typedef union {
@@ -75,6 +80,9 @@ struct bbulk {
 
 	unsigned int requests; /* number of blend calls, for debugging */
 	struct shl_lru *glyphs;
+	struct kmscon_glyph *pointer; /* arrow pointer, rotated */
+	struct video_buffer *blank;   /* no coverage, erases the border */
+	struct video_rect pointer_rects[POINTER_RECTS];
 	struct tsm_screen_cell *cells;
 	cell_flags_t *cell_flags;
 	unsigned int cell_count;
@@ -100,6 +108,8 @@ static void bbulk_destroy(struct kmscon_text *txt)
 {
 	struct bbulk *bb = txt->data;
 
+	free(bb->pointer);
+	free(bb->blank);
 	free(bb);
 }
 
@@ -164,6 +174,7 @@ static int bbulk_set(struct kmscon_text *txt)
 	if (!bb->cell_flags)
 		goto free_prev;
 
+	max_damage_rects += POINTER_RECTS * POINTER_BORDER_PARTS;
 	bb->damage_rects = calloc(max_damage_rects, sizeof(*bb->damage_rects));
 	if (!bb->damage_rects)
 		goto free_damages;
@@ -192,6 +203,10 @@ static void bbulk_unset(struct kmscon_text *txt)
 	struct bbulk *bb = txt->data;
 
 	shl_lru_free(bb->glyphs);
+	free(bb->pointer);
+	bb->pointer = NULL;
+	free(bb->blank);
+	bb->blank = NULL;
 	free(bb->damage_rects);
 	free(bb->cell_flags);
 	free(bb->cells);
@@ -497,57 +512,148 @@ static void mark_damaged(struct kmscon_text *txt, struct bbulk *bb, unsigned int
 		damage_cell(bb, off + 1 + txt->cols);
 }
 
-static unsigned int clamp(unsigned int val, unsigned int min, unsigned int max)
+/*
+ * Build the arrow pointer glyph, one cell large, tip at the top left of the
+ * cell in text orientation, and rotate it like the text glyphs.
+ */
+static struct kmscon_glyph *pointer_glyph(struct kmscon_text *txt)
 {
-	if (val < min)
-		return min;
-	if (val > max)
-		return max;
-	return val;
+	unsigned int fw = FONT_WIDTH(txt);
+	unsigned int fh = FONT_HEIGHT(txt);
+	struct kmscon_glyph *glyph;
+	double scale;
+	bool *mask;
+	unsigned int i;
+
+	mask = calloc(fw * fh, sizeof(*mask));
+	if (!mask)
+		return NULL;
+
+	glyph = calloc(1, sizeof(*glyph) + fw * fh);
+	if (!glyph) {
+		free(mask);
+		return NULL;
+	}
+
+	scale = fh / POINTER_ARROW_H;
+	if (fw / POINTER_ARROW_W < scale)
+		scale = fw / POINTER_ARROW_W;
+	pointer_arrow_mask(mask, fw, fh, 0, 0, scale);
+	for (i = 0; i < fw * fh; i++)
+		glyph->buf.data[i] = mask[i] ? 255 : 0;
+	free(mask);
+
+	glyph->buf.width = fw;
+	glyph->buf.height = fh;
+	if (txt->orientation != OR_NORMAL)
+		glyph = bbulk_rotate_glyph(glyph, txt->orientation);
+	return glyph;
 }
 
 /*
- * pointer_x and pointer_y are the center of the pointer sprite, in the
- * non-rotated screen.
+ * pointer_x and pointer_y are the tip of the arrow, in the non-rotated
+ * screen. The tip sits at a different corner of the rotated glyph.
  */
 static void set_pointer_coordinate(struct bbulk *bb, struct kmscon_text *txt,
 				   struct video_blend_req *req, unsigned int pointer_x,
 				   unsigned int pointer_y)
 {
-	unsigned int hf_w, hf_h, x, y;
-
-	if (txt->orientation == OR_NORMAL || txt->orientation == OR_UPSIDE_DOWN) {
-		hf_w = SHL_DIV_ROUND_UP(FONT_WIDTH(txt), 2);
-		hf_h = SHL_DIV_ROUND_UP(FONT_HEIGHT(txt), 2);
-	} else {
-		hf_w = SHL_DIV_ROUND_UP(FONT_HEIGHT(txt), 2);
-		hf_h = SHL_DIV_ROUND_UP(FONT_WIDTH(txt), 2);
-	}
+	int32_t x, y;
+	int32_t px = pointer_x, py = pointer_y, w = req->w, h = req->h;
 
 	switch (txt->orientation) {
 	default:
 	case OR_NORMAL:
-		x = pointer_x + bb->off_x;
-		y = pointer_y + bb->off_y;
+		x = px + (int32_t)bb->off_x;
+		y = py + (int32_t)bb->off_y;
 		break;
 	case OR_UPSIDE_DOWN:
-		x = bb->max_x - pointer_x;
-		y = bb->max_y - pointer_y;
+		x = (int32_t)bb->max_x - px - w;
+		y = (int32_t)bb->max_y - py - h;
 		break;
 	case OR_RIGHT:
-		x = bb->max_x - pointer_y;
-		y = pointer_x + bb->off_y;
+		x = (int32_t)bb->max_x - py - w;
+		y = px + (int32_t)bb->off_y;
 		break;
 	case OR_LEFT:
-		x = pointer_y + bb->off_x;
-		y = bb->max_y - pointer_x;
+		x = py + (int32_t)bb->off_x;
+		y = (int32_t)bb->max_y - px - h;
 		break;
 	}
-	x = clamp(x, hf_w, bb->max_x - hf_w);
-	y = clamp(y, hf_h, bb->max_y - hf_h);
+	/*
+	 * Upright, the glyph extends right and down from the tip and the blend
+	 * clips it at the screen edge, so it slides off the screen like a
+	 * desktop pointer. The blend cannot clip at the left or top edge, so
+	 * rotated glyphs are kept whole on the screen instead.
+	 */
+	if (txt->orientation != OR_NORMAL) {
+		x = max(0, min(x, (int32_t)bb->sw - w));
+		y = max(0, min(y, (int32_t)bb->sh - h));
+	}
+	req->x = x;
+	req->y = y;
+}
 
-	req->x = x - hf_w;
-	req->y = y - hf_h;
+/*
+ * Split the part of r outside the text area into at most
+ * POINTER_BORDER_PARTS rectangles: strips above and below, then strips left
+ * and right beside the text rows. Returns the number of parts.
+ */
+static unsigned int border_parts(const struct bbulk *bb, const struct video_rect *r,
+				 struct video_rect *parts)
+{
+	int32_t tx1 = bb->off_x, ty1 = bb->off_y, tx2 = bb->max_x, ty2 = bb->max_y;
+	int32_t y1 = max(r->y1, ty1), y2 = min(r->y2, ty2);
+	unsigned int n = 0;
+
+	if (r->x2 <= r->x1 || r->y2 <= r->y1)
+		return 0;
+	if (r->y1 < ty1)
+		parts[n++] = (struct video_rect){r->x1, r->y1, r->x2, min(r->y2, ty1)};
+	if (r->y2 > ty2)
+		parts[n++] = (struct video_rect){r->x1, max(r->y1, ty2), r->x2, r->y2};
+	if (y1 < y2 && r->x1 < tx1)
+		parts[n++] = (struct video_rect){r->x1, y1, min(r->x2, tx1), y2};
+	if (y1 < y2 && r->x2 > tx2)
+		parts[n++] = (struct video_rect){max(r->x1, tx2), y1, r->x2, y2};
+	return n;
+}
+
+/* Paint the border under an earlier pointer back in the background colour. */
+static void erase_pointer_border(struct kmscon_text *txt, const struct video_rect *r)
+{
+	struct bbulk *bb = txt->data;
+	struct video_rect parts[POINTER_BORDER_PARTS];
+	struct video_blend_req req;
+	unsigned int i, n;
+
+	if (!bb->blank)
+		return;
+	n = border_parts(bb, r, parts);
+	memset(&req, 0, sizeof(req));
+	req.buf = bb->blank;
+	req.br = bb->attr.br;
+	req.bg = bb->attr.bg;
+	req.bb = bb->attr.bb;
+	for (i = 0; i < n; i++) {
+		req.x = parts[i].x1;
+		req.y = parts[i].y1;
+		req.w = parts[i].x2 - parts[i].x1;
+		req.h = parts[i].y2 - parts[i].y1;
+		display_blend(txt->disp, &req);
+	}
+}
+
+static struct video_buffer *blank_buffer(unsigned int size)
+{
+	struct video_buffer *buf;
+
+	buf = calloc(1, sizeof(*buf) + size * size);
+	if (buf) {
+		buf->width = size;
+		buf->height = size;
+	}
+	return buf;
 }
 
 static int bbulk_draw_pointer(struct kmscon_text *txt, unsigned int pointer_x,
@@ -555,25 +661,42 @@ static int bbulk_draw_pointer(struct kmscon_text *txt, unsigned int pointer_x,
 {
 	struct bbulk *bb = txt->data;
 	struct video_blend_req req;
-	struct kmscon_glyph *bb_glyph;
-	struct tsm_screen_cell pointer_cell = {0};
-	unsigned int fw2 = FONT_WIDTH(txt) / 2;
-	unsigned int fh2 = FONT_HEIGHT(txt) / 2;
+	unsigned int fw = FONT_WIDTH(txt);
+	unsigned int fh = FONT_HEIGHT(txt);
 
-	pointer_cell.ch = 'I';
+	/*
+	 * Upright, the tip may go one pixel past the screen, as far as the
+	 * pointer range reaches, and the arrow is then gone, as a hardware
+	 * cursor is. Rotated, the tip stays on the screen.
+	 */
+	if (txt->orientation == OR_NORMAL) {
+		pointer_x = min(pointer_x, kmscon_text_get_width(txt));
+		pointer_y = min(pointer_y, kmscon_text_get_height(txt));
+	} else {
+		pointer_x = min(pointer_x, kmscon_text_get_width(txt) - 1);
+		pointer_y = min(pointer_y, kmscon_text_get_height(txt) - 1);
+	}
 
-	pointer_x = clamp(pointer_x, fw2, txt->cols * FONT_WIDTH(txt) - fw2);
-	pointer_y = clamp(pointer_y, fh2, txt->rows * FONT_HEIGHT(txt) - fh2);
-
-	bb_glyph = find_glyph(txt, &pointer_cell);
-	if (!bb_glyph)
+	if (!bb->pointer)
+		bb->pointer = pointer_glyph(txt);
+	if (!bb->blank)
+		bb->blank = blank_buffer(max(fw, fh));
+	if (!bb->pointer || !bb->blank)
 		return -ENOMEM;
 
-	req.buf = &bb_glyph->buf;
-	req.w = bb_glyph->buf.width;
-	req.h = bb_glyph->buf.height;
+	/* mark_damaged() takes the centre of a cell-sized box */
+	mark_damaged(txt, bb, pointer_x + SHL_DIV_ROUND_UP(fw, 2),
+		     pointer_y + SHL_DIV_ROUND_UP(fh, 2));
+	if (pointer_x >= bb->sw || pointer_y >= bb->sh)
+		return 0;
+
+	req.buf = &bb->pointer->buf;
+	req.w = bb->pointer->buf.width;
+	req.h = bb->pointer->buf.height;
 	set_pointer_coordinate(bb, txt, &req, pointer_x, pointer_y);
-	mark_damaged(txt, bb, pointer_x, pointer_y);
+	/* the part on the screen, for erasing the border and the damage */
+	bb->pointer_rects[0] = (struct video_rect){req.x, req.y, min(req.x + req.w, bb->sw),
+						   min(req.y + req.h, bb->sh)};
 
 	req.fr = bb->attr.fr;
 	req.fg = bb->attr.fg;
@@ -647,6 +770,19 @@ static void bbulk_compute_damage(struct kmscon_text *txt)
 		}
 	}
 }
+/* The border under the pointer is not part of any cell. */
+static void add_pointer_border_damage(struct bbulk *bb)
+{
+	struct video_rect parts[POINTER_BORDER_PARTS];
+	unsigned int i, j, n;
+
+	for (i = 0; i < POINTER_RECTS; i++) {
+		n = border_parts(bb, &bb->pointer_rects[i], parts);
+		for (j = 0; j < n; j++)
+			add_damage(bb, &parts[j]);
+	}
+}
+
 static int bbulk_render(struct kmscon_text *txt)
 {
 	struct bbulk *bb = txt->data;
@@ -655,6 +791,7 @@ static int bbulk_render(struct kmscon_text *txt)
 	// log_debug("bbulk, redraw %d cells", bb->requests);
 	if (display_supports_damage(txt->disp)) {
 		bbulk_compute_damage(txt);
+		add_pointer_border_damage(bb);
 		display_set_damage(txt->disp, bb->damage_rect_len, bb->damage_rects);
 	}
 	return ret;
@@ -690,6 +827,17 @@ static int bbulk_prepare(struct kmscon_text *txt, struct tsm_screen_attr *attr)
 	}
 	if (bb->redraw)
 		bb->redraw--;
+
+	/*
+	 * The pointer of the last two frames may still cover the border, on
+	 * this buffer or, double-buffered, on the other one; cells redraw
+	 * themselves, the border does not.
+	 */
+	for (i = POINTER_RECTS - 1; i > 0; i--) {
+		bb->pointer_rects[i] = bb->pointer_rects[i - 1];
+		erase_pointer_border(txt, &bb->pointer_rects[i]);
+	}
+	memset(&bb->pointer_rects[0], 0, sizeof(bb->pointer_rects[0]));
 
 	return 0;
 }
