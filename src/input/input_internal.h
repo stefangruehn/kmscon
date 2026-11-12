@@ -85,6 +85,17 @@ struct input_pointer {
 
 	/* Track which button is currently pressed (BUTTON_NONE=none, 0=left, 1=right, 2=middle) */
 	uint8_t pressed_button;
+
+	/* touchpad gestures: fingers on the pad now and at most during this touch */
+	uint8_t fingers;
+	uint8_t max_fingers;
+	/* touch down time, finger travel in raw units, and whether this touch can still tap */
+	struct timespec touch_start;
+	int32_t travel_x;
+	int32_t travel_y;
+	bool tap_possible;
+	/* two-finger scroll: vertical motion not yet a whole wheel step */
+	int32_t scroll_rem;
 };
 
 struct input_dev {
