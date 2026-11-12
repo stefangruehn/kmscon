@@ -48,4 +48,35 @@ static inline void pointer_arrow_mask(bool *mask, unsigned int w, unsigned int h
 	}
 }
 
+/* Width of the dark outline around an arrow as tall as @font_height. */
+static inline unsigned int pointer_outline_width(unsigned int font_height)
+{
+	return 1 + font_height / 16;
+}
+
+/*
+ * Set every pixel of @outline that is not in @shape but within @thk pixels
+ * of it, in both directions.
+ */
+static inline void pointer_outline_mask(const bool *shape, bool *outline, unsigned int w,
+					unsigned int h, unsigned int thk)
+{
+	int x, y, nx, ny, t = thk;
+	bool near;
+
+	for (y = 0; y < (int)h; y++) {
+		for (x = 0; x < (int)w; x++) {
+			near = false;
+			for (ny = y - t; ny <= y + t && !near && !shape[y * w + x]; ny++) {
+				for (nx = x - t; nx <= x + t && !near; nx++) {
+					if (ny >= 0 && ny < (int)h && nx >= 0 && nx < (int)w &&
+					    shape[ny * w + nx])
+						near = true;
+				}
+			}
+			outline[y * w + x] = near;
+		}
+	}
+}
+
 #endif /* KMSCON_RENDER_POINTER_H */

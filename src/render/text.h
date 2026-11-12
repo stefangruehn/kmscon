@@ -67,6 +67,7 @@ struct kmscon_text {
 	bool rendering;
 	enum Orientation orientation;
 	bool blinking;
+	uint8_t pointer_rgb[3]; /* fill of the software pointer */
 };
 
 struct kmscon_cursor {
@@ -119,6 +120,7 @@ int kmscon_text_rotate(struct kmscon_text *txt, enum Orientation orientation);
 int kmscon_text_prepare(struct kmscon_text *txt, struct tsm_screen_attr *attr, bool blinking);
 int kmscon_text_draw(struct kmscon_text *txt, struct tsm_screen *con, bool cursor_blink);
 int kmscon_text_draw_pointer(struct kmscon_text *txt, unsigned int x, unsigned int y);
+void kmscon_text_set_pointer_colour(struct kmscon_text *txt, const uint8_t rgb[3]);
 int kmscon_text_render(struct kmscon_text *txt);
 void kmscon_text_abort(struct kmscon_text *txt);
 

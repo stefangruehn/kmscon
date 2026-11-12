@@ -80,7 +80,8 @@ struct bbulk {
 
 	unsigned int requests; /* number of blend calls, for debugging */
 	struct shl_lru *glyphs;
-	struct kmscon_glyph *pointer; /* arrow pointer, rotated */
+	struct kmscon_glyph *pointer; /* arrow with outline, rotated, see pointer_glyph() */
+	unsigned int pointer_thk;     /* outline width */
 	struct video_buffer *blank;   /* no coverage, erases the border */
 	struct video_rect pointer_rects[POINTER_RECTS];
 	struct tsm_screen_cell *cells;
@@ -477,74 +478,64 @@ static int bbulk_draw(struct kmscon_text *txt, const struct tsm_screen_cell *cel
 }
 
 /*
- * When the pointer move over, mark the 4 underlying cells as damaged.
+ * Mark the cells under the pointer as damaged: every cell that meets the
+ * area from (x1, y1) to (x2, y2), exclusive, in text pixels.
  */
-static void mark_damaged(struct kmscon_text *txt, struct bbulk *bb, unsigned int x, unsigned int y)
+static void mark_damaged(struct kmscon_text *txt, struct bbulk *bb, int32_t x1, int32_t y1,
+			 int32_t x2, int32_t y2)
 {
-	unsigned int posx = 0;
-	unsigned int posy = 0;
-	unsigned int fw, fh, off;
-	fw = SHL_DIV_ROUND_UP(FONT_WIDTH(txt), 2);
-	fh = SHL_DIV_ROUND_UP(FONT_HEIGHT(txt), 2);
+	int32_t fw = FONT_WIDTH(txt), fh = FONT_HEIGHT(txt);
+	int32_t cx, cy, cx2, cy2;
 
-	if (x > fw)
-		posx = (x - fw) / FONT_WIDTH(txt);
-	if (y > fh)
-		posy = (y - fh) / FONT_HEIGHT(txt);
-
-	if (posx >= txt->cols)
-		posx = txt->cols - 1;
-
-	if (posy >= txt->rows)
-		posy = txt->rows - 1;
-
-	off = posx + posy * txt->cols;
-
-	damage_cell(bb, off);
-
-	if (posx + 1 < txt->cols)
-		damage_cell(bb, off + 1);
-
-	if (posy + 1 < txt->rows)
-		damage_cell(bb, off + txt->cols);
-
-	if (posx + 1 < txt->cols && posy + 1 < txt->rows)
-		damage_cell(bb, off + 1 + txt->cols);
+	if (!txt->cols || !txt->rows)
+		return;
+	cx2 = min((int32_t)txt->cols - 1, (x2 - 1) / fw);
+	cy2 = min((int32_t)txt->rows - 1, (y2 - 1) / fh);
+	for (cy = max(0, y1) / fh; cy <= cy2; cy++)
+		for (cx = max(0, x1) / fw; cx <= cx2; cx++)
+			damage_cell(bb, cx + cy * txt->cols);
 }
 
+/* Pixel classes of the pointer image, index into the colours in draw_runs() */
+enum { POINTER_NONE, POINTER_OUTLINE, POINTER_FILL, POINTER_CLASSES };
+
 /*
- * Build the arrow pointer glyph, one cell large, tip at the top left of the
- * cell in text orientation, and rotate it like the text glyphs.
+ * Build the pointer image: the arrow fills one cell with its tip at the top
+ * left in text orientation, and the outline adds @thk pixels on every side.
+ * Each pixel holds its class, not a coverage. Rotated like the text glyphs.
  */
-static struct kmscon_glyph *pointer_glyph(struct kmscon_text *txt)
+static struct kmscon_glyph *pointer_glyph(struct kmscon_text *txt, unsigned int thk)
 {
 	unsigned int fw = FONT_WIDTH(txt);
 	unsigned int fh = FONT_HEIGHT(txt);
+	unsigned int w = fw + 2 * thk, h = fh + 2 * thk;
 	struct kmscon_glyph *glyph;
+	bool *shape, *outline;
 	double scale;
-	bool *mask;
 	unsigned int i;
 
-	mask = calloc(fw * fh, sizeof(*mask));
-	if (!mask)
-		return NULL;
-
-	glyph = calloc(1, sizeof(*glyph) + fw * fh);
-	if (!glyph) {
-		free(mask);
+	shape = calloc(w * h, sizeof(*shape));
+	outline = calloc(w * h, sizeof(*outline));
+	glyph = calloc(1, sizeof(*glyph) + w * h);
+	if (!shape || !outline || !glyph) {
+		free(shape);
+		free(outline);
+		free(glyph);
 		return NULL;
 	}
 
 	scale = fh / POINTER_ARROW_H;
 	if (fw / POINTER_ARROW_W < scale)
 		scale = fw / POINTER_ARROW_W;
-	pointer_arrow_mask(mask, fw, fh, 0, 0, scale);
-	for (i = 0; i < fw * fh; i++)
-		glyph->buf.data[i] = mask[i] ? 255 : 0;
-	free(mask);
+	pointer_arrow_mask(shape, w, h, thk, thk, scale);
+	pointer_outline_mask(shape, outline, w, h, thk);
+	for (i = 0; i < w * h; i++)
+		glyph->buf.data[i] = shape[i] ? POINTER_FILL : outline[i] ? POINTER_OUTLINE : 0;
+	free(shape);
+	free(outline);
 
-	glyph->buf.width = fw;
-	glyph->buf.height = fh;
+	glyph->buf.width = w;
+	glyph->buf.height = h;
 	if (txt->orientation != OR_NORMAL)
 		glyph = bbulk_rotate_glyph(glyph, txt->orientation);
 	return glyph;
@@ -656,13 +647,58 @@ static struct video_buffer *blank_buffer(unsigned int size)
 	return buf;
 }
 
+/*
+ * Paint the set pixels of the pointer image with its top left at (x0, y0) on
+ * the screen, as one pixel high runs of one class each. Pixels outside the
+ * arrow and its outline are left alone, so the text shows through.
+ */
+static void draw_runs(struct kmscon_text *txt, const struct video_buffer *img, int32_t x0,
+		      int32_t y0, uint8_t colours[POINTER_CLASSES][3])
+{
+	struct bbulk *bb = txt->data;
+	struct video_blend_req req;
+	const uint8_t *row;
+	int32_t x, end, x1, x2, y;
+	uint8_t c;
+
+	memset(&req, 0, sizeof(req));
+	req.buf = bb->blank;
+	req.h = 1;
+	for (y = 0; y < (int32_t)img->height; y++) {
+		if (y0 + y < 0 || y0 + y >= (int32_t)bb->sh)
+			continue;
+		row = &img->data[y * img->width];
+		for (x = 0; x < (int32_t)img->width; x = end) {
+			c = row[x];
+			for (end = x + 1; end < (int32_t)img->width && row[end] == c; end++)
+				;
+			x1 = max(x0 + x, 0);
+			x2 = min(x0 + end, (int32_t)bb->sw);
+			if (c == POINTER_NONE || c >= POINTER_CLASSES || x1 >= x2)
+				continue;
+			req.x = x1;
+			req.y = y0 + y;
+			req.w = x2 - x1;
+			req.br = colours[c][0];
+			req.bg = colours[c][1];
+			req.bb = colours[c][2];
+			display_blend(txt->disp, &req);
+			bb->requests++;
+		}
+	}
+}
+
 static int bbulk_draw_pointer(struct kmscon_text *txt, unsigned int pointer_x,
 			      unsigned int pointer_y)
 {
 	struct bbulk *bb = txt->data;
 	struct video_blend_req req;
+	const struct video_buffer *img;
+	uint8_t colours[POINTER_CLASSES][3] = {{0}};
 	unsigned int fw = FONT_WIDTH(txt);
 	unsigned int fh = FONT_HEIGHT(txt);
+	unsigned int thk;
+	int32_t x0, y0;
 
 	/*
 	 * Upright, the tip may go one pixel past the screen, as far as the
@@ -677,35 +713,36 @@ static int bbulk_draw_pointer(struct kmscon_text *txt, unsigned int pointer_x,
 		pointer_y = min(pointer_y, kmscon_text_get_height(txt) - 1);
 	}
 
-	if (!bb->pointer)
-		bb->pointer = pointer_glyph(txt);
+	thk = pointer_outline_width(fh);
+	if (!bb->pointer) {
+		bb->pointer = pointer_glyph(txt, thk);
+		bb->pointer_thk = thk;
+	}
 	if (!bb->blank)
-		bb->blank = blank_buffer(max(fw, fh));
+		bb->blank = blank_buffer(max(fw, fh) + 2 * thk);
 	if (!bb->pointer || !bb->blank)
 		return -ENOMEM;
+	thk = bb->pointer_thk;
 
-	/* mark_damaged() takes the centre of a cell-sized box */
-	mark_damaged(txt, bb, pointer_x + SHL_DIV_ROUND_UP(fw, 2),
-		     pointer_y + SHL_DIV_ROUND_UP(fh, 2));
+	mark_damaged(txt, bb, (int32_t)pointer_x - (int32_t)thk, (int32_t)pointer_y - (int32_t)thk,
+		     pointer_x + fw + thk, pointer_y + fh + thk);
 	if (pointer_x >= bb->sw || pointer_y >= bb->sh)
 		return 0;
 
-	req.buf = &bb->pointer->buf;
-	req.w = bb->pointer->buf.width;
-	req.h = bb->pointer->buf.height;
+	/* place the arrow without its outline, then widen by the outline */
+	img = &bb->pointer->buf;
+	req.w = img->width - 2 * thk;
+	req.h = img->height - 2 * thk;
 	set_pointer_coordinate(bb, txt, &req, pointer_x, pointer_y);
+	x0 = (int32_t)req.x - (int32_t)thk;
+	y0 = (int32_t)req.y - (int32_t)thk;
 	/* the part on the screen, for erasing the border and the damage */
-	bb->pointer_rects[0] = (struct video_rect){req.x, req.y, min(req.x + req.w, bb->sw),
-						   min(req.y + req.h, bb->sh)};
+	bb->pointer_rects[0] = (struct video_rect){max(x0, 0), max(y0, 0),
+						   min(x0 + (int32_t)img->width, (int32_t)bb->sw),
+						   min(y0 + (int32_t)img->height, (int32_t)bb->sh)};
 
-	req.fr = bb->attr.fr;
-	req.fg = bb->attr.fg;
-	req.fb = bb->attr.fb;
-	req.br = bb->attr.br;
-	req.bg = bb->attr.bg;
-	req.bb = bb->attr.bb;
-	display_blend(txt->disp, &req);
-	bb->requests++;
+	memcpy(colours[POINTER_FILL], txt->pointer_rgb, sizeof(colours[POINTER_FILL]));
+	draw_runs(txt, img, x0, y0, colours);
 	return 0;
 }
 
