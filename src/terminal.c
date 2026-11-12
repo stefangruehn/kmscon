@@ -1022,6 +1022,11 @@ static void input_event(struct input *input, struct input_key_event *ev, void *d
 		return;
 	}
 
+	/* Keys pressed with the logo (Super) modifier belong to the system's
+	 * hotkeys, as on a Linux console whose keymap drops them. */
+	if (ev->mods & SHL_LOGO_MASK)
+		return;
+
 	/* TODO: xkbcommon supports multiple keysyms, but it is currently
 	 * unclear how this feature will be used. There is no keymap, which
 	 * uses this, yet. */
