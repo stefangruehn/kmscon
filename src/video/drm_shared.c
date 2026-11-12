@@ -829,7 +829,7 @@ bool drm_display_has_damage(struct display *disp)
 {
 	struct drm_display *ddrm = disp->data;
 
-	return ddrm->damage_blob_id != 0;
+	return ddrm->damage_blob_id != 0 || ddrm->frame_lost;
 }
 
 int drm_display_wait_pflip(struct display *disp)
@@ -1063,7 +1063,17 @@ static int pageflip(int fd, struct display *disp, uint32_t fb)
 int drm_display_swap(struct display *disp, uint32_t fb)
 {
 	struct drm_video *vdrm = disp->video->data;
+	struct drm_display *ddrm = disp->data;
 	int ret;
+
+	/*
+	 * The renderer only redraws what changed over the last two frames. A
+	 * frame that never reaches the screen leaves the other buffer behind,
+	 * so its changes must carry over into the next frame. The damage blob
+	 * does that only where the plane takes damage clips; frame_lost does
+	 * it everywhere.
+	 */
+	ddrm->frame_lost = true;
 
 	if (disp->dpms != DPMS_ON)
 		return -EINVAL;
@@ -1075,8 +1085,12 @@ int drm_display_swap(struct display *disp, uint32_t fb)
 		ret = legacy_pageflip(vdrm->fd, disp, fb);
 	else
 		ret = pageflip(vdrm->fd, disp, fb);
-	if (ret)
+	if (ret) {
+		log_debug("page flip failed for [%s] (%d), the frame carries over\n", disp->name,
+			  ret);
 		return ret;
+	}
+	ddrm->frame_lost = false;
 
 	/* take a ref on display, so that it won't get free before the pageflip
 	 * callback occurs */
