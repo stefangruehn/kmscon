@@ -80,6 +80,13 @@ struct kmscon_video {
 	bool awake;
 };
 
+struct seat_keyboard {
+	char layout[64];
+	char variant[64];
+	unsigned int repeat_delay;
+	unsigned int repeat_rate;
+};
+
 struct kmscon_seat {
 	struct ev_eloop *eloop;
 	struct conf_ctx *conf_ctx;
@@ -105,6 +112,9 @@ struct kmscon_seat {
 	/* DPMS timeout management */
 	struct ev_timer *dpms_timer;
 	bool dpms_blanked;
+
+	/* keyboard settings in use, from the options or --keyboard-file */
+	struct seat_keyboard keyboard;
 };
 
 const char be_drm3d[] = "drm3d";
@@ -619,6 +629,85 @@ int kmscon_seat_update_xkb_layout(struct kmscon_seat *seat, const char *model, c
 	return ret;
 }
 
+static void keyboard_from_conf(struct kmscon_seat *seat)
+{
+	struct seat_keyboard *kb = &seat->keyboard;
+
+	snprintf(kb->layout, sizeof(kb->layout), "%s",
+		 seat->conf->xkb_layout ? seat->conf->xkb_layout : "");
+	snprintf(kb->variant, sizeof(kb->variant), "%s",
+		 seat->conf->xkb_variant ? seat->conf->xkb_variant : "");
+	kb->repeat_delay = seat->conf->xkb_repeat_delay;
+	kb->repeat_rate = seat->conf->xkb_repeat_rate;
+}
+
+/*
+ * Read --keyboard-file into *out: one setting per line as "name value", lines
+ * starting with # are comments. Settings the file leaves out keep their value;
+ * on an error *out stays unchanged.
+ */
+static int keyboard_read(const char *path, struct seat_keyboard *out)
+{
+	struct seat_keyboard kb = *out;
+	char line[256], *name, *value, *save, *end;
+	unsigned long num;
+	int ret = 0;
+	FILE *f;
+
+	f = fopen(path, "re");
+	if (!f)
+		return -errno;
+	while (!ret && fgets(line, sizeof(line), f)) {
+		name = strtok_r(line, " \t\n", &save);
+		if (!name || name[0] == '#')
+			continue;
+		value = strtok_r(NULL, " \t\n", &save);
+		if (!value)
+			value = "";
+		if (!strcmp(name, "layout") || !strcmp(name, "variant")) {
+			char *dst = name[0] == 'l' ? kb.layout : kb.variant;
+
+			if (strlen(value) >= sizeof(kb.layout))
+				ret = -EINVAL;
+			else
+				strcpy(dst, value);
+		} else if (!strcmp(name, "repeat-delay") || !strcmp(name, "repeat-rate")) {
+			num = strtoul(value, &end, 10);
+			if (!*value || *end || num > 10000)
+				ret = -EINVAL;
+			else if (!strcmp(name, "repeat-delay"))
+				kb.repeat_delay = num;
+			else
+				kb.repeat_rate = num;
+		} else {
+			log_warning("unknown setting %s in %s", name, path);
+		}
+	}
+	fclose(f);
+	if (!ret)
+		*out = kb;
+	return ret;
+}
+
+/* SIGHUP: read --keyboard-file again; a new layout builds a new keymap. */
+static void keyboard_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info, void *data)
+{
+	struct kmscon_seat *seat = data;
+	struct seat_keyboard kb = seat->keyboard;
+	int ret;
+
+	ret = keyboard_read(seat->conf->keyboard_file, &kb);
+	if (ret) {
+		log_warning("cannot read keyboard file %s: %d", seat->conf->keyboard_file, ret);
+		return;
+	}
+	input_set_conf(seat->input, kb.repeat_delay, kb.repeat_rate, seat->conf->mouse);
+	if (strcmp(kb.layout, seat->keyboard.layout) || strcmp(kb.variant, seat->keyboard.variant))
+		kmscon_seat_update_xkb_layout(seat, seat->conf->xkb_model, kb.layout, kb.variant,
+					      seat->conf->xkb_options);
+	seat->keyboard = kb;
+}
+
 static void kmscon_seat_add_input(struct kmscon_seat *seat, struct uterm_monitor_dev *udev,
 				  const char *node)
 {
@@ -737,21 +826,35 @@ int kmscon_seat_new(struct kmscon_seat **out, struct conf_ctx *main_conf,
 		goto err_conf;
 	}
 
-	input_set_conf(seat->input, seat->conf->xkb_repeat_delay, seat->conf->xkb_repeat_rate,
+	keyboard_from_conf(seat);
+	if (seat->conf->keyboard_file) {
+		ret = keyboard_read(seat->conf->keyboard_file, &seat->keyboard);
+		if (ret)
+			log_warning("cannot read keyboard file %s: %d",
+				    seat->conf->keyboard_file, ret);
+	}
+
+	input_set_conf(seat->input, seat->keyboard.repeat_delay, seat->keyboard.repeat_rate,
 		       seat->conf->mouse);
 
-	ret = input_set_keymap(seat->input, seat->conf->xkb_model, seat->conf->xkb_layout,
-			       seat->conf->xkb_variant, seat->conf->xkb_options,
+	ret = input_set_keymap(seat->input, seat->conf->xkb_model, seat->keyboard.layout,
+			       seat->keyboard.variant, seat->conf->xkb_options,
 			       seat->conf->xkb_keymap);
 	if (ret)
 		goto err_conf;
+
+	if (seat->conf->keyboard_file) {
+		ret = ev_eloop_register_signal_cb(seat->eloop, SIGHUP, keyboard_reload, seat);
+		if (ret)
+			goto err_conf;
+	}
 
 	input_set_compose(seat->input, find_locale(), seat->conf->xkb_compose_file);
 
 	ret = uterm_monitor_new(&seat->mon, seat->eloop, seat->name, &seat_monitor_cb, seat);
 	if (ret) {
 		log_error("cannot create device monitor: %d", ret);
-		goto err_conf;
+		goto err_keyboard;
 	}
 
 	ret = input_register_key_cb(seat->input, seat_input_event, seat);
@@ -795,6 +898,8 @@ int kmscon_seat_new(struct kmscon_seat **out, struct conf_ctx *main_conf,
 
 err_mon:
 	uterm_monitor_unref(seat->mon);
+err_keyboard:
+	ev_eloop_unregister_signal_cb(seat->eloop, SIGHUP, keyboard_reload, seat);
 err_conf:
 	kmscon_conf_free(seat->conf_ctx);
 err_name:
@@ -841,6 +946,7 @@ int kmscon_seat_exit(struct kmscon_seat *seat)
 
 void kmscon_seat_free(struct kmscon_seat *seat)
 {
+	ev_eloop_unregister_signal_cb(seat->eloop, SIGHUP, keyboard_reload, seat);
 	uterm_vt_deallocate(seat->vt);
 	uterm_monitor_unref(seat->mon);
 	input_unregister_key_cb(seat->input, seat_input_event, seat);

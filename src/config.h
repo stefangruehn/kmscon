@@ -141,6 +141,8 @@ struct kmscon_conf_t {
 	unsigned int xkb_repeat_delay;
 	/* keyboard key-repeat rate */
 	unsigned int xkb_repeat_rate;
+	/* file with layout, variant and key repeat, read again on SIGHUP */
+	char *keyboard_file;
 	/* Enable mouse support */
 	bool mouse;
 	/* Natural scrolling (invert mouse wheel direction) */

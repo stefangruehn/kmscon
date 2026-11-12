@@ -139,6 +139,11 @@ static void print_help()
 		"\t                                 Initial delay for key-repeat in ms\n"
 		"\t    --xkb-repeat-rate <msecs>  [50]\n"
 		"\t                                 Delay between two key repeats in ms\n"
+		"\t    --keyboard-file <FILE>     [-]\n"
+		"\t                                 Lines 'layout', 'variant',\n"
+		"\t                                 'repeat-delay', 'repeat-rate' with\n"
+		"\t                                 a value; they replace the options\n"
+		"\t                                 above and are read again on SIGHUP\n"
 		"\t    --mouse                    [on]\n"
 		"\t                                 Enable mouse support\n"
 		"\t    --natural-scrolling        [off]\n"
@@ -1025,6 +1030,7 @@ int kmscon_conf_new(struct conf_ctx **out)
 		CONF_OPTION_STRING(0, "xkb-compose-file", &conf->xkb_compose_file, NULL),
 		CONF_OPTION_UINT(0, "xkb-repeat-delay", &conf->xkb_repeat_delay, 250),
 		CONF_OPTION_UINT(0, "xkb-repeat-rate", &conf->xkb_repeat_rate, 50),
+		CONF_OPTION_STRING(0, "keyboard-file", &conf->keyboard_file, NULL),
 		CONF_OPTION_BOOL(0, "mouse", &conf->mouse, true),
 		CONF_OPTION_BOOL(0, "natural-scrolling", &conf->natural_scrolling, false),
 		CONF_OPTION_BOOL(0, "soft-cursor", &conf->soft_cursor, false),
