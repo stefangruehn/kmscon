@@ -231,6 +231,10 @@ static void print_help()
 		"\t                              Font rendering engine\n"
 		"\t    --font-size <pixels>    [0]\n"
 		"\t                              Font size in pixels, 0 means auto\n"
+		"\t    --font-size-file <FILE> [-]\n"
+		"\t                              File with the font size in pixels;\n"
+		"\t                              replaces --font-size and is read\n"
+		"\t                              again on SIGHUP\n"
 		"\t    --font-name <name>      [monospace]\n"
 		"\t                              Font name\n"
 		"\n"
@@ -1097,6 +1101,7 @@ int kmscon_conf_new(struct conf_ctx **out)
 		/* Font Options */
 		CONF_OPTION_STRING(0, "font-engine", &conf->font_engine, NULL),
 		CONF_OPTION_UINT(0, "font-size", &conf->font_size, 0),
+		CONF_OPTION_STRING(0, "font-size-file", &conf->font_size_file, NULL),
 		CONF_OPTION_STRING(0, "font-name", &conf->font_name, "monospace"),
 
 		/* Palette Options */
