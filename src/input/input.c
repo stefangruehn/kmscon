@@ -34,6 +34,7 @@
 #include <linux/input-event-codes.h>
 #include <linux/input.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -544,7 +545,10 @@ int input_update_keymap(struct input *input, const char *model, const char *layo
 			const char *variant, const char *options)
 {
 	struct input_dev *dev;
+	xkb_mod_mask_t locked;
 
+	/* a new layout keeps Caps Lock and Num Lock, as on a VT switch */
+	locked = uxkb_locked_mods(input);
 	if (input->ctx) {
 		dlist_for_each_entry(dev, &input->devices, list)
 		{
@@ -557,6 +561,7 @@ int input_update_keymap(struct input *input, const char *model, const char *layo
 	uxkb_compose_table_destroy(input);
 	uxkb_layout_destroy(input);
 	uxkb_layout_init(input, model, layout, variant, options, NULL);
+	uxkb_lock_mods(input, locked);
 	dlist_for_each_entry(dev, &input->devices, list)
 	{
 		if (dev->capabilities & DEVICE_HAS_KEYS) {
@@ -565,6 +570,7 @@ int input_update_keymap(struct input *input, const char *model, const char *layo
 				input_wake_up_dev(dev);
 		}
 	}
+	uxkb_write_locks(input);
 	return 0;
 }
 
@@ -612,6 +618,7 @@ void input_unref(struct input *input)
 
 	uxkb_compose_table_destroy(input);
 	uxkb_layout_destroy(input);
+	free(input->lock_file);
 	shl_hook_free(input->key_hook);
 	shl_hook_free(input->pointer_hook);
 	ev_eloop_rm_timer(input->hide_pointer);
@@ -756,6 +763,7 @@ void input_wake_up(struct input *input)
 
 	log_debug("waking up");
 	uxkb_wake_up(input);
+	uxkb_write_locks(input);
 
 	/* Wake up already-probed devices */
 	dlist_for_each_entry_safe(dev, tmp, &input->devices, list)
@@ -808,4 +816,76 @@ void input_set_leds(struct input *input, unsigned int scroll_lock, unsigned int 
 	{
 		uxkb_dev_set_leds(dev, scroll_lock, num_lock, caps_lock);
 	}
+}
+
+SHL_EXPORT
+void input_set_lock_file(struct input *input, const char *path)
+{
+	if (!input)
+		return;
+
+	free(input->lock_file);
+	input->lock_file = path ? strdup(path) : NULL;
+	input->lock_text[0] = 0;
+	uxkb_write_locks(input);
+}
+
+/*
+ * Switch the lock keys a request file names, one per line as "caps on", "num
+ * off" or "scroll toggle", then remove the file so that a later SIGHUP does
+ * not switch them again. A missing file is no request.
+ */
+SHL_EXPORT
+void input_request_locks(struct input *input, const char *path)
+{
+	char line[64], *name, *value, *save;
+	struct input_dev *dev;
+	bool changed = false;
+	FILE *f;
+	int on;
+
+	if (!input || !path)
+		return;
+
+	f = fopen(path, "re");
+	if (!f) {
+		if (errno != ENOENT)
+			log_warning("cannot open lock request file %s: %m", path);
+		return;
+	}
+	while (fgets(line, sizeof(line), f)) {
+		name = strtok_r(line, " \t\n", &save);
+		value = name ? strtok_r(NULL, " \t\n", &save) : NULL;
+		if (!value)
+			continue;
+		if (!strcmp(value, "on"))
+			on = 1;
+		else if (!strcmp(value, "off"))
+			on = 0;
+		else if (!strcmp(value, "toggle"))
+			on = -1;
+		else
+			continue;
+		if (uxkb_set_lock(input, name, on))
+			changed = true;
+	}
+	fclose(f);
+	if (unlink(path))
+		log_warning("cannot remove lock request file %s: %m", path);
+
+	if (!changed)
+		return;
+	dlist_for_each_entry(dev, &input->devices, list)
+	{
+		if (dev->rfd >= 0)
+			uxkb_dev_update_keyboard_leds(dev);
+	}
+	uxkb_write_locks(input);
+}
+
+SHL_EXPORT
+void input_set_insert(struct input *input, enum input_insert mode)
+{
+	if (input)
+		input->insert_mode = mode;
 }

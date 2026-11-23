@@ -90,6 +90,13 @@ typedef void (*input_pointer_cb)(struct input *input, struct input_pointer_event
 typedef int (*uterm_open_cb)(const char *node, int *fd_id, void *data);
 typedef void (*uterm_close_cb)(int fd, int fd_id, void *data);
 
+/* what a bare Insert (no Shift, Ctrl, Alt or Super) does */
+enum input_insert {
+	INPUT_INSERT_PASS,
+	INPUT_INSERT_NOTIFY,
+	INPUT_INSERT_BLOCK,
+};
+
 int input_new(struct input **out, struct ev_eloop *eloop);
 int input_set_keymap(struct input *input, const char *model, const char *layout,
 		     const char *variant, const char *options, const char *keymap);
@@ -121,5 +128,9 @@ void input_set_pointer_max(struct input *input, unsigned int max_x, unsigned int
 
 void input_set_leds(struct input *input, unsigned int scroll_lock, unsigned int num_lock,
 		    unsigned int caps_lock);
+
+void input_set_lock_file(struct input *input, const char *path);
+void input_request_locks(struct input *input, const char *path);
+void input_set_insert(struct input *input, enum input_insert mode);
 
 #endif /* KMSCON_INPUT_H */
