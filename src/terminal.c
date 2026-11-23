@@ -110,6 +110,8 @@ struct kmscon_terminal {
 	/* file behind the font name and colours of the palette file, as last
 	 * loaded: SIGHUP reloads only what changed */
 	char *font_target;
+	/* size last read from the font-size file, 0 without one */
+	unsigned int file_font_size;
 	palette_t file_palette;
 	bool file_palette_set;
 	/* optional 17th colour of the palette file, for the pointer */
@@ -1000,6 +1002,27 @@ static void zoom_out(struct kmscon_terminal *term)
 	terminal_update_size_notify(term);
 }
 
+/* the pixel size in the font-size file, 0 if it holds none */
+static unsigned int font_size_read(const char *path)
+{
+	unsigned int size;
+	FILE *f;
+	int n;
+
+	f = fopen(path, "re");
+	if (!f) {
+		log_warning("cannot open font-size file %s: %d", path, -errno);
+		return 0;
+	}
+	n = fscanf(f, "%u", &size);
+	fclose(f);
+	if (n != 1 || !size || size > 150) {
+		log_warning("no font size in %s", path);
+		return 0;
+	}
+	return size;
+}
+
 /*
  * SIGHUP: read the font file again, at its own size. The font name may be a
  * link that was pointed to another file, so the size of the text changes
@@ -1009,7 +1032,25 @@ static void zoom_out(struct kmscon_terminal *term)
 static void font_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info, void *data)
 {
 	struct kmscon_terminal *term = data;
+	unsigned int size;
 	char *target;
+
+	/* with a font-size file the font name stays, the size comes from the file */
+	if (term->conf->font_size_file) {
+		size = font_size_read(term->conf->font_size_file);
+		if (!size || size == term->file_font_size)
+			return;
+		term->auto_font_size = false;
+		if (font_set(term, size)) {
+			log_warning("cannot load font %s at %u pixels", term->conf->font_name,
+				    size);
+			return;
+		}
+		term->file_font_size = size;
+		font_update_all(term);
+		terminal_update_size_notify(term);
+		return;
+	}
 
 	target = term->conf->font_name ? realpath(term->conf->font_name, NULL) : NULL;
 	if (target && term->font_target && !strcmp(target, term->font_target)) {
@@ -1769,6 +1810,12 @@ struct kmscon_terminal *terminal_new(struct kmscon_session *session, unsigned in
 		term->rotation = rotation_read(term->conf->rotation_file);
 
 	term->font_size = term->conf->font_size;
+	/* on a bad file the size given as option stays */
+	if (term->conf->font_size_file) {
+		term->file_font_size = font_size_read(term->conf->font_size_file);
+		if (term->file_font_size)
+			term->font_size = term->file_font_size;
+	}
 	if (term->font_size) {
 		ret = font_set(term, term->font_size);
 		if (ret)

@@ -211,6 +211,8 @@ struct kmscon_conf_t {
 	char *font_engine;
 	/* font size */
 	unsigned int font_size;
+	/* file with the font size, read again on SIGHUP */
+	char *font_size_file;
 	/* font name */
 	char *font_name;
 
