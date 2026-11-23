@@ -25,11 +25,15 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <linux/input.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <xkbcommon/xkbcommon-compose.h>
 #include <xkbcommon/xkbcommon.h>
@@ -422,6 +426,22 @@ static void uxkb_dev_repeat(struct input_dev *dev, unsigned int state)
 	ev_timer_update(dev->repeat_timer, &spec);
 }
 
+/* Insert on its own or on the keypad, without Shift, Ctrl, Alt or Super */
+static bool uxkb_bare_insert(struct xkb_state *state, xkb_keysym_t sym)
+{
+	static const char *const mods[] = {XKB_MOD_NAME_SHIFT, XKB_MOD_NAME_CTRL, XKB_MOD_NAME_ALT,
+					   XKB_MOD_NAME_LOGO};
+	size_t i;
+
+	if (sym != XKB_KEY_Insert && sym != XKB_KEY_KP_Insert)
+		return false;
+	for (i = 0; i < sizeof(mods) / sizeof(*mods); i++) {
+		if (xkb_state_mod_name_is_active(state, mods[i], XKB_STATE_MODS_EFFECTIVE) > 0)
+			return false;
+	}
+	return true;
+}
+
 int uxkb_dev_process(struct input_dev *dev, uint16_t key_state, uint16_t code)
 {
 	struct xkb_state *state;
@@ -513,14 +533,24 @@ int uxkb_dev_process(struct input_dev *dev, uint16_t key_state, uint16_t code)
 	else if (key_state == KEY_RELEASED)
 		changed = xkb_state_update_key(state, keycode, XKB_KEY_UP);
 
-	if (changed & XKB_STATE_LEDS)
+	if (changed & XKB_STATE_LEDS) {
 		uxkb_dev_update_keyboard_leds(dev);
+		uxkb_write_locks(dev->input);
+	}
 
 	if (num_keysyms <= 0)
 		return -ENOKEY;
 
 	if (compose_status == XKB_COMPOSE_COMPOSING || compose_status == XKB_COMPOSE_CANCELLED)
 		return -ENOKEY;
+
+	if (key_state == KEY_PRESSED && num_keysyms == 1 &&
+	    dev->input->insert_mode != INPUT_INSERT_PASS && uxkb_bare_insert(state, keysyms[0])) {
+		dev->input->insert_count++;
+		uxkb_write_locks(dev->input);
+		if (dev->input->insert_mode == INPUT_INSERT_BLOCK)
+			return -ENOKEY;
+	}
 
 	ret = uxkb_dev_fill_event(dev, &dev->event, keycode, num_keysyms, keysyms);
 	if (ret)
@@ -576,4 +606,174 @@ void uxkb_wake_up(struct input *input)
 
 	if (input->compose_state)
 		xkb_compose_state_reset(input->compose_state);
+}
+
+xkb_mod_mask_t uxkb_locked_mods(struct input *input)
+{
+	if (!input->state)
+		return 0;
+	return xkb_state_serialize_mods(input->state, XKB_STATE_MODS_LOCKED);
+}
+
+void uxkb_lock_mods(struct input *input, xkb_mod_mask_t mods)
+{
+	if (input->state && mods)
+		xkb_state_update_mask(input->state, 0, 0, mods, 0, 0, 0);
+}
+
+/* the lock keys of --lock-file and --lock-request-file, in file order */
+static const struct {
+	const char *name;
+	const char *led;
+	xkb_keysym_t sym;
+} uxkb_locks[] = {
+	{"caps", XKB_LED_NAME_CAPS, XKB_KEY_Caps_Lock},
+	{"num", XKB_LED_NAME_NUM, XKB_KEY_Num_Lock},
+	{"scroll", XKB_LED_NAME_SCROLL, XKB_KEY_Scroll_Lock},
+};
+
+struct uxkb_key_search {
+	xkb_keysym_t sym;
+	xkb_keycode_t key;
+};
+
+static void uxkb_search_key(struct xkb_keymap *keymap, xkb_keycode_t key, void *data)
+{
+	struct uxkb_key_search *search = data;
+	const xkb_keysym_t *syms;
+	int i, n;
+
+	if (search->key != XKB_KEYCODE_INVALID)
+		return;
+	n = xkb_keymap_key_get_syms_by_level(keymap, key, 0, 0, &syms);
+	for (i = 0; i < n; i++) {
+		if (syms[i] == search->sym) {
+			search->key = key;
+			return;
+		}
+	}
+}
+
+/* the key that gives sym on the first level of the first layout, if any */
+static xkb_keycode_t uxkb_key_for(struct xkb_keymap *keymap, xkb_keysym_t sym)
+{
+	struct uxkb_key_search search = {sym, XKB_KEYCODE_INVALID};
+
+	xkb_keymap_key_for_each(keymap, uxkb_search_key, &search);
+	return search.key;
+}
+
+/* whether pressing the key for lock i switches its LED, tried on a fresh state */
+static bool uxkb_lock_switchable(struct xkb_keymap *keymap, size_t i)
+{
+	struct xkb_state *state;
+	xkb_keycode_t key;
+	int was;
+	bool ret;
+
+	key = uxkb_key_for(keymap, uxkb_locks[i].sym);
+	if (key == XKB_KEYCODE_INVALID)
+		return false;
+	state = xkb_state_new(keymap);
+	if (!state)
+		return false;
+	was = xkb_state_led_name_is_active(state, uxkb_locks[i].led) > 0;
+	xkb_state_update_key(state, key, XKB_KEY_DOWN);
+	xkb_state_update_key(state, key, XKB_KEY_UP);
+	ret = (xkb_state_led_name_is_active(state, uxkb_locks[i].led) > 0) != was;
+	xkb_state_unref(state);
+	return ret;
+}
+
+/*
+ * Write --lock-file when its content changed: through a new file and a
+ * rename, so a reader never sees half of it. A lock is "none" when it is off
+ * and no key of the keymap switches it (Scroll Lock has a key in the usual
+ * keymaps, but no LED change).
+ */
+void uxkb_write_locks(struct input *input)
+{
+	char text[sizeof(input->lock_text)], tmp[PATH_MAX];
+	size_t i, len = 0;
+	const char *word;
+	int fd, ret;
+	FILE *f;
+
+	if (!input->lock_file || !input->state)
+		return;
+
+	for (i = 0; i < sizeof(uxkb_locks) / sizeof(*uxkb_locks); i++) {
+		if (xkb_state_led_name_is_active(input->state, uxkb_locks[i].led) > 0)
+			word = "on";
+		else if (uxkb_lock_switchable(input->keymap, i))
+			word = "off";
+		else
+			word = "none";
+		len += snprintf(text + len, sizeof(text) - len, "%s %s\n", uxkb_locks[i].name,
+				word);
+	}
+	snprintf(text + len, sizeof(text) - len, "insert %u\n", input->insert_count);
+	if (!strcmp(text, input->lock_text))
+		return;
+
+	ret = snprintf(tmp, sizeof(tmp), "%s.new", input->lock_file);
+	if (ret < 0 || (size_t)ret >= sizeof(tmp))
+		return;
+	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd < 0) {
+		log_warning("cannot write lock file %s: %m", tmp);
+		return;
+	}
+	/* readable by the user's status line, whatever the umask */
+	fchmod(fd, 0644);
+	f = fdopen(fd, "w");
+	if (!f) {
+		close(fd);
+		return;
+	}
+	fputs(text, f);
+	if (fclose(f) || rename(tmp, input->lock_file)) {
+		log_warning("cannot write lock file %s: %m", input->lock_file);
+		unlink(tmp);
+		return;
+	}
+	snprintf(input->lock_text, sizeof(input->lock_text), "%s", text);
+}
+
+/*
+ * Switch one lock key (on 1, off 0, toggle -1) by pressing and releasing the
+ * key the keymap has for it, as the keyboard would. Returns true if the lock
+ * changed.
+ */
+bool uxkb_set_lock(struct input *input, const char *name, int on)
+{
+	xkb_keycode_t key;
+	size_t i;
+	int was;
+
+	if (!input->state)
+		return false;
+	for (i = 0; i < sizeof(uxkb_locks) / sizeof(*uxkb_locks); i++) {
+		if (!strcmp(name, uxkb_locks[i].name))
+			break;
+	}
+	if (i == sizeof(uxkb_locks) / sizeof(*uxkb_locks)) {
+		log_warning("unknown lock %s", name);
+		return false;
+	}
+	was = xkb_state_led_name_is_active(input->state, uxkb_locks[i].led) > 0;
+	if (on >= 0 && on == was)
+		return false;
+	key = uxkb_key_for(input->keymap, uxkb_locks[i].sym);
+	if (key == XKB_KEYCODE_INVALID) {
+		log_warning("no key for lock %s", name);
+		return false;
+	}
+	xkb_state_update_key(input->state, key, XKB_KEY_DOWN);
+	xkb_state_update_key(input->state, key, XKB_KEY_UP);
+	if ((xkb_state_led_name_is_active(input->state, uxkb_locks[i].led) > 0) == was) {
+		log_warning("lock %s did not switch", name);
+		return false;
+	}
+	return true;
 }

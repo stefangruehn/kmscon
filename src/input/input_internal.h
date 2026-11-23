@@ -33,6 +33,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
+#include <xkbcommon/xkbcommon.h>
 #include "input.h"
 #include "shl/dlist.h"
 #include "shl/eloop.h"
@@ -156,6 +157,12 @@ struct input {
 	struct ev_timer *hide_pointer;
 
 	struct dlist devices;
+
+	/* --lock-file and its last content, to write it only on a change */
+	char *lock_file;
+	char lock_text[64];
+	enum input_insert insert_mode;
+	unsigned int insert_count;
 };
 
 static inline bool input_bit_is_set(const unsigned long *array, int bit)
@@ -174,6 +181,10 @@ void uxkb_dev_destroy(struct input_dev *dev);
 int uxkb_dev_process(struct input_dev *dev, uint16_t key_state, uint16_t code);
 unsigned int uxkb_dev_get_mods(struct input_dev *dev);
 void uxkb_wake_up(struct input *input);
+xkb_mod_mask_t uxkb_locked_mods(struct input *input);
+void uxkb_lock_mods(struct input *input, xkb_mod_mask_t mods);
+void uxkb_write_locks(struct input *input);
+bool uxkb_set_lock(struct input *input, const char *name, int on);
 void uxkb_dev_update_keyboard_leds(struct input_dev *dev);
 void uxkb_dev_set_leds(struct input_dev *dev, unsigned int scroll_lock, unsigned int num_lock,
 		       unsigned int caps_lock);

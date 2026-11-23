@@ -85,6 +85,7 @@ struct seat_keyboard {
 	char variant[64];
 	unsigned int repeat_delay;
 	unsigned int repeat_rate;
+	enum input_insert insert;
 };
 
 struct kmscon_seat {
@@ -639,6 +640,7 @@ static void keyboard_from_conf(struct kmscon_seat *seat)
 		 seat->conf->xkb_variant ? seat->conf->xkb_variant : "");
 	kb->repeat_delay = seat->conf->xkb_repeat_delay;
 	kb->repeat_rate = seat->conf->xkb_repeat_rate;
+	kb->insert = INPUT_INSERT_PASS;
 }
 
 /*
@@ -671,6 +673,15 @@ static int keyboard_read(const char *path, struct seat_keyboard *out)
 				ret = -EINVAL;
 			else
 				strcpy(dst, value);
+		} else if (!strcmp(name, "insert")) {
+			if (!strcmp(value, "pass"))
+				kb.insert = INPUT_INSERT_PASS;
+			else if (!strcmp(value, "notify"))
+				kb.insert = INPUT_INSERT_NOTIFY;
+			else if (!strcmp(value, "block"))
+				kb.insert = INPUT_INSERT_BLOCK;
+			else
+				ret = -EINVAL;
 		} else if (!strcmp(name, "repeat-delay") || !strcmp(name, "repeat-rate")) {
 			num = strtoul(value, &end, 10);
 			if (!*value || *end || num > 10000)
@@ -689,10 +700,9 @@ static int keyboard_read(const char *path, struct seat_keyboard *out)
 	return ret;
 }
 
-/* SIGHUP: read --keyboard-file again; a new layout builds a new keymap. */
-static void keyboard_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info, void *data)
+/* read --keyboard-file again; a new layout builds a new keymap */
+static void keyboard_reload_file(struct kmscon_seat *seat)
 {
-	struct kmscon_seat *seat = data;
 	struct seat_keyboard kb = seat->keyboard;
 	int ret;
 
@@ -702,10 +712,22 @@ static void keyboard_reload(struct ev_eloop *eloop, struct signalfd_siginfo *inf
 		return;
 	}
 	input_set_conf(seat->input, kb.repeat_delay, kb.repeat_rate, seat->conf->mouse);
+	input_set_insert(seat->input, kb.insert);
 	if (strcmp(kb.layout, seat->keyboard.layout) || strcmp(kb.variant, seat->keyboard.variant))
 		kmscon_seat_update_xkb_layout(seat, seat->conf->xkb_model, kb.layout, kb.variant,
 					      seat->conf->xkb_options);
 	seat->keyboard = kb;
+}
+
+/* SIGHUP: the keyboard file, then the lock keys a request file names */
+static void keyboard_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info, void *data)
+{
+	struct kmscon_seat *seat = data;
+
+	if (seat->conf->keyboard_file)
+		keyboard_reload_file(seat);
+	if (seat->conf->lock_request_file)
+		input_request_locks(seat->input, seat->conf->lock_request_file);
 }
 
 static void kmscon_seat_add_input(struct kmscon_seat *seat, struct uterm_monitor_dev *udev,
@@ -859,7 +881,11 @@ int kmscon_seat_new(struct kmscon_seat **out, struct conf_ctx *main_conf,
 	if (ret)
 		goto err_conf;
 
-	if (seat->conf->keyboard_file) {
+	input_set_insert(seat->input, seat->keyboard.insert);
+	if (seat->conf->lock_file)
+		input_set_lock_file(seat->input, seat->conf->lock_file);
+
+	if (seat->conf->keyboard_file || seat->conf->lock_request_file) {
 		ret = ev_eloop_register_signal_cb(seat->eloop, SIGHUP, keyboard_reload, seat);
 		if (ret)
 			goto err_conf;

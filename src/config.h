@@ -143,6 +143,10 @@ struct kmscon_conf_t {
 	unsigned int xkb_repeat_rate;
 	/* file with layout, variant and key repeat, read again on SIGHUP */
 	char *keyboard_file;
+	/* file kmscon writes with the state of the lock keys */
+	char *lock_file;
+	/* file with lock keys to switch, read and removed on SIGHUP */
+	char *lock_request_file;
 	/* Enable mouse support */
 	bool mouse;
 	/* Natural scrolling (invert mouse wheel direction) */

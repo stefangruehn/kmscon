@@ -143,7 +143,19 @@ static void print_help()
 		"\t                                 Lines 'layout', 'variant',\n"
 		"\t                                 'repeat-delay', 'repeat-rate' with\n"
 		"\t                                 a value; they replace the options\n"
-		"\t                                 above and are read again on SIGHUP\n"
+		"\t                                 above and are read again on SIGHUP.\n"
+		"\t                                 'insert pass|notify|block': a bare\n"
+		"\t                                 Insert goes through, goes through\n"
+		"\t                                 and counts in --lock-file, or only\n"
+		"\t                                 counts\n"
+		"\t    --lock-file <FILE>         [-]\n"
+		"\t                                 Written with lines 'caps', 'num',\n"
+		"\t                                 'scroll' (on, off or none) and\n"
+		"\t                                 'insert' (count) on every change\n"
+		"\t    --lock-request-file <FILE> [-]\n"
+		"\t                                 Lines 'caps', 'num' or 'scroll'\n"
+		"\t                                 with on, off or toggle; read and\n"
+		"\t                                 removed on SIGHUP\n"
 		"\t    --mouse                    [on]\n"
 		"\t                                 Enable mouse support\n"
 		"\t    --natural-scrolling        [off]\n"
@@ -1042,6 +1054,8 @@ int kmscon_conf_new(struct conf_ctx **out)
 		CONF_OPTION_UINT(0, "xkb-repeat-delay", &conf->xkb_repeat_delay, 250),
 		CONF_OPTION_UINT(0, "xkb-repeat-rate", &conf->xkb_repeat_rate, 50),
 		CONF_OPTION_STRING(0, "keyboard-file", &conf->keyboard_file, NULL),
+		CONF_OPTION_STRING(0, "lock-file", &conf->lock_file, NULL),
+		CONF_OPTION_STRING(0, "lock-request-file", &conf->lock_request_file, NULL),
 		CONF_OPTION_BOOL(0, "mouse", &conf->mouse, true),
 		CONF_OPTION_BOOL(0, "natural-scrolling", &conf->natural_scrolling, false),
 		CONF_OPTION_BOOL(0, "soft-cursor", &conf->soft_cursor, false),
