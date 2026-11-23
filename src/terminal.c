@@ -117,6 +117,8 @@ struct kmscon_terminal {
 	bool file_pointer_set;
 	/* mode from the multi-monitor file, NULL for the option */
 	char *multi_monitor;
+	/* rotation of the external screens from the rotation file, -1 for none */
+	int rotation;
 
 	struct kmscon_pointer pointer;
 
@@ -845,6 +847,24 @@ static void rotate_ccw_all(struct kmscon_terminal *term)
 	terminal_update_size_notify(term);
 }
 
+/*
+ * A built-in panel (DPI, DSI, eDP, LVDS) keeps its orientation; the rotation
+ * file turns the others, such as a monitor on HDMI or DisplayPort.
+ */
+static bool connector_external(const char *connector)
+{
+	static const char *const internal[] = {"DPI", "DSI", "eDP", "LVDS"};
+	size_t i;
+
+	if (!connector)
+		return false;
+	for (i = 0; i < sizeof(internal) / sizeof(*internal); i++) {
+		if (!strncmp(connector, internal[i], strlen(internal[i])))
+			return false;
+	}
+	return true;
+}
+
 int terminal_add_display(struct kmscon_terminal *term, struct display *disp)
 {
 	struct screen *scr;
@@ -871,6 +891,8 @@ int terminal_add_display(struct kmscon_terminal *term, struct display *disp)
 	connector = display_name(disp);
 
 	config_get_screen(term->conf, gpu, connector, &orientation, &scr->config_enabled);
+	if (term->rotation >= 0 && connector_external(connector))
+		orientation = term->rotation;
 
 	ret = display_register_pageflip(scr->disp, display_pageflip, scr);
 	if (ret) {
@@ -1142,6 +1164,62 @@ static void multi_monitor_reload(struct ev_eloop *eloop, struct signalfd_siginfo
 	log_info("multi-monitor mode %s", mode);
 	free(term->multi_monitor);
 	term->multi_monitor = mode;
+	terminal_update_size_notify(term);
+	redraw_all(term);
+}
+
+/* the first word of the rotation file as an orientation, or -1 */
+static int rotation_read(const char *path)
+{
+	static const char *const words[] = {
+		[OR_NORMAL] = "normal",
+		[OR_RIGHT] = "right",
+		[OR_UPSIDE_DOWN] = "upside-down",
+		[OR_LEFT] = "left",
+	};
+	char word[16];
+	FILE *f;
+	int n, i;
+
+	f = fopen(path, "re");
+	if (!f) {
+		log_warning("cannot open rotation file %s: %d", path, -errno);
+		return -1;
+	}
+	n = fscanf(f, "%15s", word);
+	fclose(f);
+	for (i = 0; n == 1 && i <= OR_LEFT; i++) {
+		if (!strcmp(word, words[i]))
+			return i;
+	}
+	log_warning("no rotation in %s", path);
+	return -1;
+}
+
+/*
+ * SIGHUP: read the rotation file again and turn the external screens when it
+ * changed. A screen plugged in later gets the rotation in terminal_add_display.
+ */
+static void rotation_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info, void *data)
+{
+	struct kmscon_terminal *term = data;
+	struct screen *scr;
+	int rotation;
+
+	if (!term->conf->rotation_file)
+		return;
+	rotation = rotation_read(term->conf->rotation_file);
+	if (rotation < 0 || rotation == term->rotation)
+		return;
+	log_info("rotation %d", rotation);
+	term->rotation = rotation;
+	dlist_for_each_entry(scr, &term->screens, list)
+	{
+		if (!connector_external(display_name(scr->disp)))
+			continue;
+		kmscon_text_rotate(scr->txt, rotation);
+		refresh_hw_cursor(scr);
+	}
 	terminal_update_size_notify(term);
 	redraw_all(term);
 }
@@ -1569,6 +1647,7 @@ void terminal_destroy(struct kmscon_terminal *term)
 {
 	log_debug("free terminal object %p", term);
 
+	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, rotation_reload, term);
 	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, multi_monitor_reload, term);
 	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, palette_reload, term);
 	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, font_reload, term);
@@ -1684,6 +1763,10 @@ struct kmscon_terminal *terminal_new(struct kmscon_session *session, unsigned in
 	/* on a bad file the mode given as option stays */
 	if (term->conf->multi_monitor_file)
 		term->multi_monitor = multi_monitor_read(term->conf->multi_monitor_file);
+	/* on a bad file the screens keep the orientation of --screen */
+	term->rotation = -1;
+	if (term->conf->rotation_file)
+		term->rotation = rotation_read(term->conf->rotation_file);
 
 	term->font_size = term->conf->font_size;
 	if (term->font_size) {
@@ -1744,12 +1827,17 @@ struct kmscon_terminal *terminal_new(struct kmscon_session *session, unsigned in
 	ret = ev_eloop_register_signal_cb(term->eloop, SIGHUP, multi_monitor_reload, term);
 	if (ret)
 		goto err_palette_reload;
+	ret = ev_eloop_register_signal_cb(term->eloop, SIGHUP, rotation_reload, term);
+	if (ret)
+		goto err_multi_monitor_reload;
 
 	ev_eloop_ref(term->eloop);
 	input_ref(term->input);
 	log_debug("new terminal object %p", term);
 	return term;
 
+err_multi_monitor_reload:
+	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, multi_monitor_reload, term);
 err_palette_reload:
 	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, palette_reload, term);
 err_font_reload:

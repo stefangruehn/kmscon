@@ -196,6 +196,8 @@ struct kmscon_conf_t {
 	char *multi_monitor;
 	/* file with the multi-monitor mode, read again on SIGHUP */
 	char *multi_monitor_file;
+	/* file with the rotation of external screens, read again on SIGHUP */
+	char *rotation_file;
 	/* screen configuration */
 	unsigned int screen_count;
 	struct kmscon_conf_screen *screens;
