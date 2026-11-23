@@ -462,6 +462,18 @@ static int real_deactivate(struct uterm_vt *base)
 	return -EINPROGRESS;
 }
 
+/* A console nothing has open shows an empty screen with no way back by key. */
+static bool real_vt_in_use(struct uterm_vt_real *vt, int id)
+{
+	struct vt_stat st;
+
+	if (id < 1 || id > 15)
+		return false;
+	if (ioctl(vt->real_fd, VT_GETSTATE, &st))
+		return true;
+	return st.v_state & (1 << id);
+}
+
 static void real_input(struct input *input, struct input_key_event *ev, void *data)
 {
 	struct uterm_vt_real *vt = data;
@@ -493,16 +505,17 @@ static void real_input(struct input *input, struct input_key_event *ev, void *da
 	} else if ((mods == SHL_ALT_MASK || mods == SHL_LOGO_MASK) &&
 		   ev->keysyms[0] == XKB_KEY_Left) {
 		ev->handled = true;
-		id = vt->real_num - 1;
-		if (id == 0)
-			id = MAX_VT;
+		id = vt->real_num;
+		do {
+			id = id - 1 ? id - 1 : MAX_VT;
+		} while (id != vt->real_num && !real_vt_in_use(vt, id));
 	} else if ((mods == SHL_ALT_MASK || mods == SHL_LOGO_MASK) &&
 		   ev->keysyms[0] == XKB_KEY_Right) {
 		ev->handled = true;
-		if (vt->real_num >= MAX_VT)
-			id = 1;
-		else
-			id = vt->real_num + 1;
+		id = vt->real_num;
+		do {
+			id = id >= MAX_VT ? 1 : id + 1;
+		} while (id != vt->real_num && !real_vt_in_use(vt, id));
 	} else if (ev->keysyms[0] >= XKB_KEY_XF86Switch_VT_1 &&
 		   ev->keysyms[0] <= XKB_KEY_XF86Switch_VT_12) {
 		ev->handled = true;
@@ -513,6 +526,10 @@ static void real_input(struct input *input, struct input_key_event *ev, void *da
 
 	if (!id || id == vt->real_num)
 		return;
+	if (!real_vt_in_use(vt, id)) {
+		log_debug("not switching to unused VT %d", id);
+		return;
+	}
 
 	log_debug("deactivating VT %d to %d due to user input", vt->real_num, id);
 
