@@ -767,6 +767,22 @@ static void seat_monitor_hotplug_dev(void *data, enum uterm_monitor_dev_type typ
 			kmscon_seat_poll_video(dev_data);
 }
 
+/*
+ * SIGHUP: look at the video devices again, as a udev hotplug event would.
+ * Under mdev no udevd sends these events, so a screen plugged in or out would
+ * stay unnoticed until the next VT switch.
+ */
+static void seat_video_rescan(struct ev_eloop *eloop, struct signalfd_siginfo *info, void *data)
+{
+	struct kmscon_seat *seat = data;
+	struct kmscon_video *vid;
+
+	dlist_for_each_entry(vid, &seat->videos, list)
+	{
+		kmscon_seat_poll_video(vid);
+	}
+}
+
 static struct uterm_monitor_cb seat_monitor_cb = {
 	.new_dev = seat_monitor_new_dev,
 	.free_dev = seat_monitor_free_dev,
@@ -857,9 +873,13 @@ int kmscon_seat_new(struct kmscon_seat **out, struct conf_ctx *main_conf,
 		goto err_keyboard;
 	}
 
-	ret = input_register_key_cb(seat->input, seat_input_event, seat);
+	ret = ev_eloop_register_signal_cb(seat->eloop, SIGHUP, seat_video_rescan, seat);
 	if (ret)
 		goto err_mon;
+
+	ret = input_register_key_cb(seat->input, seat_input_event, seat);
+	if (ret)
+		goto err_rescan;
 
 	/* Register pointer event handler for DPMS management */
 	ret = input_register_pointer_cb(seat->input, seat_pointer_event, seat);
@@ -896,6 +916,8 @@ int kmscon_seat_new(struct kmscon_seat **out, struct conf_ctx *main_conf,
 	*out = seat;
 	return 0;
 
+err_rescan:
+	ev_eloop_unregister_signal_cb(seat->eloop, SIGHUP, seat_video_rescan, seat);
 err_mon:
 	uterm_monitor_unref(seat->mon);
 err_keyboard:
@@ -946,6 +968,7 @@ int kmscon_seat_exit(struct kmscon_seat *seat)
 
 void kmscon_seat_free(struct kmscon_seat *seat)
 {
+	ev_eloop_unregister_signal_cb(seat->eloop, SIGHUP, seat_video_rescan, seat);
 	ev_eloop_unregister_signal_cb(seat->eloop, SIGHUP, keyboard_reload, seat);
 	uterm_vt_deallocate(seat->vt);
 	uterm_monitor_unref(seat->mon);
