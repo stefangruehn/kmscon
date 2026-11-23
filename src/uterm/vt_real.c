@@ -502,15 +502,13 @@ static void real_input(struct input *input, struct input_key_event *ev, void *da
 		id = ev->keysyms[0] - XKB_KEY_F1 + 1;
 		if (id == vt->real_num)
 			return;
-	} else if ((mods == SHL_ALT_MASK || mods == SHL_LOGO_MASK) &&
-		   ev->keysyms[0] == XKB_KEY_Left) {
+	} else if (mods == SHL_LOGO_MASK && ev->keysyms[0] == XKB_KEY_Left) {
 		ev->handled = true;
 		id = vt->real_num;
 		do {
 			id = id - 1 ? id - 1 : MAX_VT;
 		} while (id != vt->real_num && !real_vt_in_use(vt, id));
-	} else if ((mods == SHL_ALT_MASK || mods == SHL_LOGO_MASK) &&
-		   ev->keysyms[0] == XKB_KEY_Right) {
+	} else if (mods == SHL_LOGO_MASK && ev->keysyms[0] == XKB_KEY_Right) {
 		ev->handled = true;
 		id = vt->real_num;
 		do {
