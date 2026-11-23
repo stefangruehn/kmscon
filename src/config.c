@@ -202,6 +202,12 @@ static void print_help()
 		"\t                                      Set the orientation, or just disable\n"
 		"\t                                      a monitor. GPU and connector are\n"
 		"\t                                      optional\n"
+		"\t    --multi-monitor <mode>    [scaled]\n"
+		"\t                                      largest, scaled or clone\n"
+		"\t    --multi-monitor-file <path> [off]\n"
+		"\t                                      One word, the mode as for\n"
+		"\t                                      --multi-monitor, read again\n"
+		"\t                                      on SIGHUP\n"
 		"\n"
 		"Font Options:\n"
 		"\t    --font-engine <engine>  [freetype]\n"
@@ -1065,6 +1071,7 @@ int kmscon_conf_new(struct conf_ctx **out)
 		CONF_OPTION_BOOL(0, "use-original-mode", &conf->use_original_mode, false),
 		CONF_OPTION(0, 0, "mode", &conf_modes, NULL, NULL, NULL, &conf->modes, NULL),
 		CONF_OPTION_STRING(0, "multi-monitor", &conf->multi_monitor, "scaled"),
+		CONF_OPTION_STRING(0, "multi-monitor-file", &conf->multi_monitor_file, NULL),
 		CONF_OPTION(0, 0, "screen", &conf_screens, NULL, NULL, NULL, &conf->screens, false),
 
 		/* Font Options */

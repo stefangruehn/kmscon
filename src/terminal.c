@@ -115,6 +115,8 @@ struct kmscon_terminal {
 	/* optional 17th colour of the palette file, for the pointer */
 	uint8_t file_pointer[3];
 	bool file_pointer_set;
+	/* mode from the multi-monitor file, NULL for the option */
+	char *multi_monitor;
 
 	struct kmscon_pointer pointer;
 
@@ -759,6 +761,7 @@ static bool terminal_update_size(struct kmscon_terminal *term)
 	struct screen *scr;
 	unsigned int cols = term->cols;
 	unsigned int rows = term->rows;
+	const char *mode = term->multi_monitor ? term->multi_monitor : term->conf->multi_monitor;
 
 	if (term->auto_font_size) {
 		unsigned int new_font_size = terminal_get_auto_font_size(term);
@@ -770,9 +773,9 @@ static bool terminal_update_size(struct kmscon_terminal *term)
 
 	font_update_all(term);
 
-	if (term->conf->multi_monitor && !strcmp(term->conf->multi_monitor, "largest")) {
+	if (mode && !strcmp(mode, "largest")) {
 		terminal_update_size_largest(term);
-	} else if (term->conf->multi_monitor && !strcmp(term->conf->multi_monitor, "scaled")) {
+	} else if (mode && !strcmp(mode, "scaled")) {
 		terminal_update_size_scaled(term);
 	} else {
 		terminal_update_size_clone(term);
@@ -1093,6 +1096,53 @@ static void palette_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info
 	{
 		refresh_hw_cursor(scr);
 	}
+	redraw_all(term);
+}
+
+/* the first word of the multi-monitor file, if it names a mode */
+static char *multi_monitor_read(const char *path)
+{
+	char word[16];
+	FILE *f;
+	int n;
+
+	f = fopen(path, "re");
+	if (!f) {
+		log_warning("cannot open multi-monitor file %s: %d", path, -errno);
+		return NULL;
+	}
+	n = fscanf(f, "%15s", word);
+	fclose(f);
+	if (n != 1 ||
+	    (strcmp(word, "largest") && strcmp(word, "scaled") && strcmp(word, "clone"))) {
+		log_warning("no multi-monitor mode in %s", path);
+		return NULL;
+	}
+	return strdup(word);
+}
+
+/*
+ * SIGHUP: read the multi-monitor file again and lay the screens out anew when
+ * the mode changed. Screens a mode switched off come back with the next one.
+ */
+static void multi_monitor_reload(struct ev_eloop *eloop, struct signalfd_siginfo *info, void *data)
+{
+	struct kmscon_terminal *term = data;
+	char *mode;
+
+	if (!term->conf->multi_monitor_file)
+		return;
+	mode = multi_monitor_read(term->conf->multi_monitor_file);
+	if (!mode)
+		return;
+	if (term->multi_monitor && !strcmp(mode, term->multi_monitor)) {
+		free(mode);
+		return;
+	}
+	log_info("multi-monitor mode %s", mode);
+	free(term->multi_monitor);
+	term->multi_monitor = mode;
+	terminal_update_size_notify(term);
 	redraw_all(term);
 }
 
@@ -1519,6 +1569,7 @@ void terminal_destroy(struct kmscon_terminal *term)
 {
 	log_debug("free terminal object %p", term);
 
+	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, multi_monitor_reload, term);
 	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, palette_reload, term);
 	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, font_reload, term);
 	terminal_close(term);
@@ -1537,6 +1588,7 @@ void terminal_destroy(struct kmscon_terminal *term)
 	ev_eloop_unref(term->eloop);
 	free_selection(term);
 	free(term->font_target);
+	free(term->multi_monitor);
 	free(term);
 }
 
@@ -1629,6 +1681,9 @@ struct kmscon_terminal *terminal_new(struct kmscon_session *session, unsigned in
 	palette_load(term);
 	if (term->conf->font_name)
 		term->font_target = realpath(term->conf->font_name, NULL);
+	/* on a bad file the mode given as option stays */
+	if (term->conf->multi_monitor_file)
+		term->multi_monitor = multi_monitor_read(term->conf->multi_monitor_file);
 
 	term->font_size = term->conf->font_size;
 	if (term->font_size) {
@@ -1686,12 +1741,17 @@ struct kmscon_terminal *terminal_new(struct kmscon_session *session, unsigned in
 	ret = ev_eloop_register_signal_cb(term->eloop, SIGHUP, palette_reload, term);
 	if (ret)
 		goto err_font_reload;
+	ret = ev_eloop_register_signal_cb(term->eloop, SIGHUP, multi_monitor_reload, term);
+	if (ret)
+		goto err_palette_reload;
 
 	ev_eloop_ref(term->eloop);
 	input_ref(term->input);
 	log_debug("new terminal object %p", term);
 	return term;
 
+err_palette_reload:
+	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, palette_reload, term);
 err_font_reload:
 	ev_eloop_unregister_signal_cb(term->eloop, SIGHUP, font_reload, term);
 err_asciinema:
@@ -1715,6 +1775,7 @@ err_con:
 	tsm_screen_unref(term->console);
 err_free:
 	free(term->font_target);
+	free(term->multi_monitor);
 	free(term);
 	return NULL;
 }
